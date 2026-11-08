@@ -1,0 +1,22 @@
+import { afterEach, describe, expect, test } from 'bun:test';
+import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { Readable } from 'node:stream';
+import { attachmentDirectory, readAttachmentBody, storeAttachment } from '../attachment-service.js';
+const dirs = [];
+const dir = () => { const d=mkdtempSync(join(tmpdir(),'webui-upload-'));dirs.push(d);return d; };
+const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jXioAAAAASUVORK5CYII=','base64');
+afterEach(()=>{for(const d of dirs.splice(0))rmSync(d,{recursive:true,force:true})});
+describe('authenticated attachment storage',()=>{
+ test('stores image bytes privately with a unique image path',()=>{const directory=dir();const a=storeAttachment(png,{filename:'截图.png',directory});expect(a.isImage).toBe(true);expect(a.contentType).toBe('image/png');expect(a.path.startsWith(directory+'/')).toBe(true);expect(readFileSync(a.path)).toEqual(png);expect(statSync(a.path).mode&0o777).toBe(0o600)});
+ test('keeps traversal and Windows paths inside the upload directory',()=>{const directory=dir();for(const filename of ['../../secret.txt','C:\\Users\\a\\secret.txt']){const a=storeAttachment(Buffer.from('hello'),{filename,directory});expect(a.path.startsWith(directory+'/')).toBe(true);expect(a.name).toBe('secret.txt')}expect(readdirSync(directory)).toHaveLength(2)});
+ test('does not overwrite files with identical names',()=>{const directory=dir();const a=storeAttachment(png,{filename:'same.png',directory}),b=storeAttachment(png,{filename:'same.png',directory});expect(a.path).not.toBe(b.path)});
+ test('rejects empty, oversized and invalid image payloads without writing',()=>{const directory=dir();for(const [bytes,filename,maxBytes] of [[Buffer.alloc(0),'empty.txt',20],[Buffer.alloc(21),'big.txt',20],[Buffer.from('not a png'),'bad.png',20]])expect(()=>storeAttachment(bytes,{filename,directory,maxBytes})).toThrow();expect(readdirSync(directory)).toHaveLength(0)});
+ test('supports long Unicode filenames and preserves valid image extensions',()=>{const a=storeAttachment(png,{filename:'图'.repeat(100)+'.png',directory:dir()});expect(a.path.endsWith('.png')).toBe(true);expect(readFileSync(a.path)).toEqual(png)});
+ test('preserves ordinary files as readable attachments',()=>{const a=storeAttachment(Buffer.from('# read me'),{filename:'note.md',contentType:'text/markdown',directory:dir()});expect(a.isImage).toBe(false);expect(readFileSync(a.path,'utf8')).toBe('# read me')});
+ test('uses shared Codex storage by default and explicit isolated test directories',()=>{expect(attachmentDirectory({CODEX_HOME:'/home/test/.codex'})).toBe('/home/test/.codex/codex-webui-uploads');expect(attachmentDirectory({CODEX_WEBUI_UPLOAD_DIR:'/tmp/only-test'})).toBe('/tmp/only-test')});
+ test('bounds chunked uploads without relying on content-length',async()=>{const req=Readable.from([Buffer.alloc(6),Buffer.alloc(6)]);req.headers={};await expect(readAttachmentBody(req,10)).rejects.toMatchObject({status:413})});
+ test('rejects oversized declared requests before buffering',async()=>{const req=Readable.from([Buffer.from('a')]);req.headers={'content-length':'30'};await expect(readAttachmentBody(req,10)).rejects.toMatchObject({status:413})});
+ test('reads raw binary upload bytes unchanged',async()=>{const req=Readable.from([png.subarray(0,5),png.subarray(5)]);req.headers={};expect(await readAttachmentBody(req)).toEqual(png)});
+});

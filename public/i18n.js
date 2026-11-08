@@ -207,6 +207,18 @@ Object.assign(ZH_CN, {
   "Open original": "打开原图",
   "Close image viewer": "关闭图片查看器",
   "Image could not be loaded.": "无法加载图片。",
+  "Attach files": "添加附件",
+  "Attachments": "附件",
+  "Uploading…": "正在上传…",
+  "Remove {name}": "移除 {name}",
+  "You can attach up to 10 files at a time.": "一次最多添加 10 个附件。",
+  "Empty files cannot be attached.": "不能添加空文件。",
+  "Each attachment must be 25 MB or smaller.": "每个附件不能超过 25 MB。",
+  "Upload failed. Please try again.": "上传失败，请重试。",
+  "Please wait for attachments to finish uploading.": "请等待附件上传完成。",
+  "This image file is invalid or unsupported.": "图片文件无效或格式不受支持。",
+  "Upload interrupted. Please try again.": "上传中断，请重试。",
+
 });
 
 Object.assign(ZH_CN, {

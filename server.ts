@@ -1,3 +1,4 @@
+import { readAttachmentBody, storeAttachment } from './attachment-service.js';
 import { createReadStream, existsSync, readFileSync } from "node:fs";
 import { join, relative, resolve, extname } from "node:path";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
@@ -68,7 +69,7 @@ const pending = new Map<number, { resolve: (value: any) => void; reject: (error:
 const reviewDiffs = new ReviewDiffStore();
 const liveSessions = new LiveSessionStore();
 const threadPaths = new Map<string, string>();
-let codexSessionsRoot = resolve(homeDir, ".codex", "sessions");
+let codexSessionsRoot = resolve(process.env.CODEX_HOME || resolve(homeDir, ".codex"), "sessions");
 let seq = 1;
 let codex: ChildProcessWithoutNullStreams | null = null;
 let stdoutBuffer = "";
@@ -472,6 +473,25 @@ const server = createServer(async (req, res) => {
       }
     }
     unauthorizedResponse(res);
+    return;
+  }
+  if (url.pathname === "/api/attachments") {
+    if (req.method !== "POST") {
+      res.writeHead(405, { "content-type": "application/json; charset=utf-8", allow: "POST", "cache-control": "no-store" });
+      res.end(JSON.stringify({ error: "Method not allowed" })); return;
+    }
+    try {
+      const filename = decodeURIComponent(String(req.headers["x-file-name"] || ""));
+      const contentType = String(req.headers["x-file-type"] || "");
+      const bytes = await readAttachmentBody(req);
+      const attachment = storeAttachment(bytes, { filename, contentType });
+      res.writeHead(201, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", "x-content-type-options": "nosniff" });
+      res.end(JSON.stringify(attachment));
+    } catch (error: any) {
+      const status = Number.isInteger(error?.status) ? error.status : 400;
+      res.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", "x-content-type-options": "nosniff" });
+      res.end(JSON.stringify({ error: error instanceof Error ? error.message : "Upload failed" }));
+    }
     return;
   }
   if (url.pathname === "/api/events") {

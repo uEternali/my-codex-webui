@@ -43,7 +43,8 @@ function safeEqual(left, right) {
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
-const PASSWORD_SESSION_COOKIE = "codex_webui_session";
+const configuredCookieName = process.env.CODEX_WEBUI_SESSION_COOKIE;
+const PASSWORD_SESSION_COOKIE = configuredCookieName && /^[A-Za-z0-9_-]+$/.test(configuredCookieName) ? configuredCookieName : "codex_webui_session";
 const DEFAULT_SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const STORED_PASSWORD_VERSION = 1;
 
