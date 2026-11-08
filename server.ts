@@ -1,4 +1,7 @@
-import { readAttachmentBody, storeAttachment } from './attachment-service.js';
+import { attachmentDirectory, readAttachmentBody } from './attachment-service.js';
+import { readJsonBody } from './http-body.js';
+import { AttachmentLifecycle } from './attachment-lifecycle-service.js';
+import { AttachmentUploadStore } from './attachment-upload-service.js';
 import { createReadStream, existsSync, readFileSync } from "node:fs";
 import { join, relative, resolve, extname } from "node:path";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
@@ -10,12 +13,15 @@ import { applyReviewPatch } from "./review-service.js";
 import { ReviewDiffStore, parseReviewPatchRequest } from "./review-state.js";
 import { unifiedDiffFromFileChanges } from "./public/codex-surfaces.js";
 import { rpcErrorPayload } from "./public/bridge-errors.js";
+import { PendingRequestStore } from "./public/approval-state.js";
 import { createTerminalSession, normalizeTerminalResize, resolveTerminalCwd } from "./terminal-service.js";
 import { readWorkspaceContext } from "./workspace-context.js";
 import { searchWorkspaceFiles } from "./file-search.js";
 import { resolveLocalFile } from "./file-service.js";
 import { resolveLocalImage } from "./image-service.js";
 import { LiveSessionStore } from "./live-session-service.js";
+import { ForkedThreadIndex } from "./forked-thread-service.js";
+import { PinnedThreadStore } from "./pinned-thread-service.js";
 import {
   createPasswordSession,
   createStoredPassword,
@@ -67,9 +73,14 @@ const sseClients = new Set<ServerResponse>();
 const terminalSessions = new Map<WebSocket, ReturnType<typeof createTerminalSession>>();
 const pending = new Map<number, { resolve: (value: any) => void; reject: (error: Error) => void }>();
 const reviewDiffs = new ReviewDiffStore();
+const serverRequests = new PendingRequestStore();
 const liveSessions = new LiveSessionStore();
 const threadPaths = new Map<string, string>();
 let codexSessionsRoot = resolve(process.env.CODEX_HOME || resolve(homeDir, ".codex"), "sessions");
+const attachments = new AttachmentLifecycle({ directory: attachmentDirectory(), codexHome: resolve(codexSessionsRoot, '..') });
+const attachmentUploads = new AttachmentUploadStore(attachments);
+let forkedThreads = new ForkedThreadIndex(resolve(codexSessionsRoot, "..", "codex-webui-forks.json"));
+let pinnedThreads = new PinnedThreadStore(resolve(codexSessionsRoot, "..", "codex-webui-pins.json"));
 let seq = 1;
 let codex: ChildProcessWithoutNullStreams | null = null;
 let stdoutBuffer = "";
@@ -113,6 +124,8 @@ function startCodex() {
     connected = false;
     accountLoader.invalidate();
     reviewDiffs.clear();
+    serverRequests.clear();
+    broadcast(serverRequestsSnapshot());
     broadcast({ type: "bridge/status", status: "disconnected", code, signal });
     for (const item of pending.values()) item.reject(new Error("Codex app-server exited"));
     pending.clear();
@@ -168,6 +181,10 @@ async function initialize() {
   });
   sendRaw({ method: "initialized", params: {} });
   if (typeof result?.codexHome === "string") codexSessionsRoot = resolve(result.codexHome, "sessions");
+  const forkStorePath = resolve(codexSessionsRoot, "..", "codex-webui-forks.json");
+  if (forkedThreads.path !== forkStorePath) forkedThreads = new ForkedThreadIndex(forkStorePath);
+  const pinStorePath = resolve(codexSessionsRoot, "..", "codex-webui-pins.json");
+  if (pinnedThreads.path !== pinStorePath) pinnedThreads = new PinnedThreadStore(pinStorePath);
   connected = true;
   broadcast({ type: "bridge/status", status: "connected", info: result });
 }
@@ -183,10 +200,18 @@ function handleCodex(message: any) {
     }
   }
   if (message.id !== undefined && message.method) {
+    serverRequests.record(message);
     broadcast({ type: "codex/request", payload: message });
     return;
   }
   if (message.method) {
+    if (serverRequests.handleNotification(message)) broadcast(serverRequestsSnapshot());
+    if (message.method === "thread/name/updated") forkedThreads.invalidate(message.params?.threadId);
+    if (message.method === "thread/archived" || message.method === "thread/unarchived") {
+      const archived = message.method === "thread/archived", id = message.params?.threadId;
+      forkedThreads.setArchived(id, archived);
+      if (archived) pinnedThreads.forget(id);
+    }
     if (message.method === "account/updated") accountLoader.invalidate();
     if (message.method === "turn/diff/updated") reviewDiffs.record(message.params || {});
     if (message.method === "item/fileChange/patchUpdated") recordFileChangeDiff(message.params || {});
@@ -260,15 +285,71 @@ function broadcast(data: any) {
   for (const client of sseClients) if (!client.writableEnded) client.write(`data: ${text}\n\n`);
 }
 
+function serverRequestsSnapshot() {
+  return { type: "codex/requests", requests: serverRequests.snapshot() };
+}
+
 async function dispatchBrowserMessage(message: any) {
   const id = message?.id;
   if (message?.type === "rpc") {
     try {
       if (!isAllowedBrowserRpcMethod(message.method)) throw new Error("RPC method is not available to browser clients");
       const params = message.params || {};
-      const result = message.method === "host/thread/live"
-        ? await readLiveThread(params.threadId)
-        : await request(message.method, params);
+      const readSummary = (threadId: string) => request("thread/read", { threadId, includeTurns: false });
+      let attachmentDeletion: Awaited<ReturnType<typeof attachments.prepareDelete>> | null = null;
+      if (message.method === 'turn/start' || message.method === 'turn/steer') attachments.record(params.threadId, params.input);
+      if (message.method === 'thread/delete') {
+        try {
+          const saved = await request('thread/read', { threadId: params.threadId, includeTurns: true });
+          attachmentDeletion = await attachments.prepareDelete(params.threadId, saved.thread);
+        } catch (error) { console.warn('[attachments] Cannot verify deletion references:', error instanceof Error ? error.message : String(error)); }
+      }
+      let result: any;
+      if (message.method === "host/thread/live") result = await readLiveThread(params.threadId);
+      else if (message.method === "host/thread/pin") {
+        if (typeof params.threadId !== "string" || !params.threadId.trim() || typeof params.pinned !== "boolean") throw new Error("Invalid pin request");
+        const { thread } = await readSummary(params.threadId);
+        if (!thread || thread.ephemeral || /[/\\]archived_sessions[/\\]/.test(thread.path || "")) throw new Error("Only saved, active chats can be pinned");
+        result = pinnedThreads.set(params.threadId, params.pinned);
+        broadcast({ type: "codex/notification", payload: { method: "host/thread/pinned", params: result } });
+      } else if (message.method === "thread/fork") {
+        const { thread: original } = await readSummary(params.threadId);
+        const name = `分支 · ${String(original?.name || original?.preview || "Untitled task").replace(/\s+/g, " ").trim()}`;
+        result = await request(message.method, params);
+        if (result?.thread) {
+          try { attachments.record(result.thread.id, result.thread, params.threadId); }
+          catch (error) { console.warn('[attachments] Could not index fork references:', error instanceof Error ? error.message : String(error)); }
+          result.thread = forkedThreads.remember(result.thread);
+          try {
+            await request("thread/name/set", { threadId: result.thread.id, name });
+            result.thread.name = name;
+          } catch (error) {
+            // Creation already succeeded: return the branch so a retry cannot duplicate it.
+            result.namingError = "Branch created, but its name could not be saved";
+          }
+        }
+      } else result = await request(message.method, params);
+      if (message.method === "thread/list") {
+        result = await forkedThreads.merge(result, params, readSummary);
+        result = await pinnedThreads.merge(result, params, readSummary);
+      }
+      if (message.method === "thread/name/set") forkedThreads.invalidate(params.threadId);
+      if (message.method === "thread/archive" || message.method === "thread/unarchive") {
+        const archived = message.method === "thread/archive";
+        forkedThreads.setArchived(params.threadId, archived);
+        if (archived) pinnedThreads.forget(params.threadId);
+      }
+      if (message.method === "thread/delete") {
+        let cleanup;
+        try { cleanup = await attachments.cleanupDeleted(attachmentDeletion); }
+        catch (error) {
+          console.warn('[attachments] Cleanup skipped:', error instanceof Error ? error.message : String(error));
+          cleanup = { deleted: 0, retained: attachmentDeletion?.files.length || 0, warning: true };
+        }
+        result = { ...result, attachmentCleanup: cleanup };
+        forkedThreads.forget(params.threadId);
+        pinnedThreads.forget(params.threadId);
+      }
       recordThreadPathsFromRpc(result);
       recordReviewDiffsFromRpc(message.method, params, result);
       return { type: "rpc/result", id, result };
@@ -278,12 +359,18 @@ async function dispatchBrowserMessage(message: any) {
   }
   if (message?.type === "codex/response") {
     if (!Number.isSafeInteger(message.requestId)) throw new Error("Invalid Codex request id");
+    if (!serverRequests.has(message.requestId)) throw new Error("This Codex request is no longer pending");
     sendRaw({ id: message.requestId, result: message.result });
+    serverRequests.resolve(message.requestId);
+    broadcast(serverRequestsSnapshot());
     return { type: "ack" };
   }
   if (message?.type === "codex/error") {
     if (!Number.isSafeInteger(message.requestId)) throw new Error("Invalid Codex request id");
+    if (!serverRequests.has(message.requestId)) throw new Error("This Codex request is no longer pending");
     sendRaw({ id: message.requestId, error: message.error });
+    serverRequests.resolve(message.requestId);
+    broadcast(serverRequestsSnapshot());
     return { type: "ack" };
   }
   if (message?.type === "ping") return { type: "pong" };
@@ -293,24 +380,6 @@ async function dispatchBrowserMessage(message: any) {
 async function handleClient(client: WebSocket, message: any) {
   try { client.send(JSON.stringify(await dispatchBrowserMessage(message))); }
   catch (error) { client.send(JSON.stringify(rpcErrorPayload(message?.id, error))); }
-}
-
-function readJsonBody(req: IncomingMessage, maxBytes = 256_000) {
-  return new Promise<any>((resolvePromise, reject) => {
-    let body = "", tooLarge = false;
-    req.setEncoding("utf8");
-    req.on("data", chunk => {
-      if (tooLarge) return;
-      if (Buffer.byteLength(body) + Buffer.byteLength(chunk) > maxBytes) { tooLarge = true; return; }
-      body += chunk;
-    });
-    req.on("error", reject);
-    req.on("end", () => {
-      if (tooLarge) return reject(new Error("Bridge payload too large"));
-      try { resolvePromise(JSON.parse(body || "{}")); }
-      catch { reject(new Error("Invalid JSON payload")); }
-    });
-  });
 }
 
 function passwordSetupRequired() {
@@ -476,18 +545,38 @@ const server = createServer(async (req, res) => {
     return;
   }
   if (url.pathname === "/api/attachments") {
-    if (req.method !== "POST") {
-      res.writeHead(405, { "content-type": "application/json; charset=utf-8", allow: "POST", "cache-control": "no-store" });
+    if (req.method !== "POST" && req.method !== "DELETE") {
+      res.writeHead(405, { "content-type": "application/json; charset=utf-8", allow: "POST, DELETE", "cache-control": "no-store" });
       res.end(JSON.stringify({ error: "Method not allowed" })); return;
     }
+    let upload: ReturnType<typeof attachmentUploads.begin> | null = null;
     try {
+      if (req.method === 'DELETE') {
+        const payload = await readJsonBody(req, 4096);
+        let cleanup;
+        try { cleanup = await attachmentUploads.discard(payload); }
+        catch (error: any) {
+          if (error?.status) throw error;
+          console.warn('[attachments] Draft cleanup skipped:', error instanceof Error ? error.message : String(error));
+          cleanup = { deleted: 0, retained: 0, warning: true };
+        }
+        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
+        res.end(JSON.stringify(cleanup)); return;
+      }
+      upload = attachmentUploads.begin(req.headers['x-upload-id']);
+      const requestId = upload.id;
+      const cancel = () => { void attachmentUploads.discard({ uploadId: requestId }).catch(error => console.warn('[attachments] Cancelled upload cleanup skipped:', error.message)); };
+      req.once('aborted', cancel);
+      res.once('close', () => { if (!res.writableFinished) cancel(); });
       const filename = decodeURIComponent(String(req.headers["x-file-name"] || ""));
       const contentType = String(req.headers["x-file-type"] || "");
       const bytes = await readAttachmentBody(req);
-      const attachment = storeAttachment(bytes, { filename, contentType });
+      const attachment = attachmentUploads.store(upload, bytes, { filename, contentType });
       res.writeHead(201, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", "x-content-type-options": "nosniff" });
       res.end(JSON.stringify(attachment));
     } catch (error: any) {
+      if (upload) await attachmentUploads.discard({ uploadId: upload.id }).catch(cleanupError => console.warn('[attachments] Failed upload cleanup skipped:', cleanupError.message));
+      if (res.destroyed) return;
       const status = Number.isInteger(error?.status) ? error.status : 400;
       res.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", "x-content-type-options": "nosniff" });
       res.end(JSON.stringify({ error: error instanceof Error ? error.message : "Upload failed" }));
@@ -511,6 +600,7 @@ const server = createServer(async (req, res) => {
     res.write("retry: 1000\n\n");
     sseClients.add(res);
     res.write(`data: ${JSON.stringify({ type: "bridge/status", status: connected ? "connected" : "connecting" })}\n\n`);
+    res.write(`data: ${JSON.stringify(serverRequestsSnapshot())}\n\n`);
     req.on("close", () => sseClients.delete(res));
     return;
   }
@@ -682,35 +772,27 @@ const server = createServer(async (req, res) => {
       res.end(JSON.stringify({ error: "Method not allowed" }));
       return;
     }
-    let body = "";
-    req.setEncoding("utf8");
-    req.on("data", chunk => {
-      body += chunk;
-      if (body.length > 2_000_000) req.destroy(new Error("Review patch payload too large"));
-    });
-    req.on("end", async () => {
-      let requestPayload: ReturnType<typeof parseReviewPatchRequest> | null = null;
-      let operationStarted = false;
-      let success = false;
-      try {
-        const payload = JSON.parse(body || "{}");
-        requestPayload = parseReviewPatchRequest(payload);
-        const stored = reviewDiffs.begin(requestPayload.threadId, requestPayload.turnId, requestPayload.action);
-        operationStarted = true;
-        const threadResult = await request("thread/read", { threadId: requestPayload.threadId, includeTurns: false });
-        const cwd = threadResult?.thread?.cwd;
-        if (typeof cwd !== "string" || !cwd) throw new Error("Thread working directory is unavailable");
-        const result = await applyReviewPatch({ cwd, diff: stored.diff, action: requestPayload.action }, reviewRoots);
-        success = true;
-        res.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
-        res.end(JSON.stringify(result));
-      } catch (error) {
-        res.writeHead(400, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
-        res.end(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }));
-      } finally {
-        if (operationStarted && requestPayload) reviewDiffs.finish(requestPayload.threadId, requestPayload.turnId, requestPayload.action, success);
-      }
-    });
+    let requestPayload: ReturnType<typeof parseReviewPatchRequest> | null = null;
+    let operationStarted = false;
+    let success = false;
+    try {
+      const payload = await readJsonBody(req, 4096);
+      requestPayload = parseReviewPatchRequest(payload);
+      const stored = reviewDiffs.begin(requestPayload.threadId, requestPayload.turnId, requestPayload.action);
+      operationStarted = true;
+      const threadResult = await request("thread/read", { threadId: requestPayload.threadId, includeTurns: false });
+      const cwd = threadResult?.thread?.cwd;
+      if (typeof cwd !== "string" || !cwd) throw new Error("Thread working directory is unavailable");
+      const result = await applyReviewPatch({ cwd, diff: stored.diff, action: requestPayload.action }, reviewRoots);
+      success = true;
+      res.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
+      res.end(JSON.stringify(result));
+    } catch (error) {
+      res.writeHead(400, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
+      res.end(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }));
+    } finally {
+      if (operationStarted && requestPayload) reviewDiffs.finish(requestPayload.threadId, requestPayload.turnId, requestPayload.action, success);
+    }
     return;
   }
   if (url.pathname.startsWith("/vendor/katex/")) {
@@ -775,6 +857,7 @@ server.on("upgrade", (req, socket, head) => {
 wss.on("connection", (client) => {
   clients.add(client);
   client.send(JSON.stringify({ type: "bridge/status", status: connected ? "connected" : "connecting" }));
+  client.send(JSON.stringify(serverRequestsSnapshot()));
   client.on("message", (raw) => {
     try { handleClient(client, JSON.parse(String(raw))); }
     catch (error) { client.send(JSON.stringify({ type: "rpc/error", error: String(error) })); }

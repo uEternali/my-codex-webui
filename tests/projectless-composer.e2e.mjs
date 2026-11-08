@@ -3,6 +3,7 @@ import { artifact, launchOptions } from './browser-runtime.mjs';
 
 const browser=await chromium.launch(launchOptions());
 const page=await browser.newPage({viewport:{width:1018,height:980},colorScheme:'dark'});
+await page.addInitScript(()=>{if(window===window.top)localStorage.setItem('codex-webui-locale','en')});
 const errors=[];page.on('pageerror',error=>errors.push(error.message));
 await page.goto(process.env.CODEX_WEBUI_TEST_URL||'http://127.0.0.1:8899',{waitUntil:'networkidle'});
 
@@ -45,8 +46,9 @@ console.log(JSON.stringify({selectedProject,picker,chooseProjectAction,projectPi
 await browser.close();
 
 if(selectedProject.triggerHidden
-  ||!selectedProject.trigger?.includes(selectedProject.sidebar)
-  ||!selectedProject.heading?.includes(selectedProject.sidebar)
+  ||selectedProject.trigger!=='Choose project'
+  ||selectedProject.sidebar!==''
+  ||selectedProject.heading!=='What can I help?'
   ||picker.title!=='Project'
   ||!picker.projectless?.includes('None')||!picker.projectless?.includes("Don't work in a project")
   ||projectless.heading!=='What can I help?'

@@ -3,6 +3,7 @@ import { launchOptions } from './browser-runtime.mjs';
 
 const browser=await chromium.launch(launchOptions());
 const page=await browser.newPage({viewport:{width:1280,height:800},colorScheme:'dark'});
+await page.addInitScript(()=>{if(window===window.top)localStorage.setItem('codex-webui-locale','en')});
 const baseUrl=process.env.CODEX_WEBUI_TEST_URL||'http://127.0.0.1:8899';
 const pageErrors=[];
 page.on('pageerror',error=>pageErrors.push(error.message));
@@ -16,6 +17,12 @@ const initial=await page.evaluate(()=>{
   const root=getComputedStyle(document.documentElement);
   return {
     topbarHeight:topbar?.getBoundingClientRect().height,
+    sidebarTop:sidebar.getBoundingClientRect().top,
+    sidebarHeaderTop:document.querySelector('.sidebar-mode-row').getBoundingClientRect().top,
+    topbarLeft:topbar.getBoundingClientRect().left,
+    sidebarRight:sidebar.getBoundingClientRect().right,
+    conversationTop:main.getBoundingClientRect().top,
+    mobileCloseHidden:getComputedStyle(document.querySelector('#closeSidebar')).display==='none',
     hasBottomPanelButton:Boolean(document.querySelector('#toggleBottomPanel')),
     hasSummaryPanelButton:Boolean(document.querySelector('#toggleSummaryPanel')),
     hasSidePanelButton:Boolean(document.querySelector('#toggleSidePanel')),
@@ -116,6 +123,11 @@ await browser.close();
 const expectedActions=['Review','Terminal','Browser','Files','Side task'];
 const valid=pageErrors.length===0
   &&initial.topbarHeight===46
+  &&initial.sidebarTop===0
+  &&initial.sidebarHeaderTop<12
+  &&initial.topbarLeft===initial.sidebarRight
+  &&initial.conversationTop===46
+  &&initial.mobileCloseHidden
   &&initial.hasBottomPanelButton
   &&initial.hasSummaryPanelButton
   &&initial.hasSidePanelButton

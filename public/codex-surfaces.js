@@ -216,6 +216,11 @@ export function summarizeActivity(item) {
   const status = item.status || "completed";
   const active = status === "inProgress" || status === "running" || status === "pendingInit";
   const failed = ["failed", "declined", "errored", "interrupted", "cancelled", "canceled"].includes(status);
+  if (item.type === "contextCompaction") return {
+    label: active ? "Compacting context…" : failed ? "Context compaction failed" : "Context compacted",
+    detail: "", category: "compaction", animation: "local-context", active,
+    tone: failed ? "error" : active ? "active" : "success",
+  };
   if (item.type === "imageView") {
     const paths = item.imagePaths || [];
     const count = paths.length;

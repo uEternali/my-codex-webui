@@ -1,4 +1,5 @@
 import { closeSync, fstatSync, openSync, readSync } from "node:fs";
+import { StringDecoder } from "node:string_decoder";
 
 function contentText(content) {
   if (typeof content === "string") return content;
@@ -206,13 +207,16 @@ export class LiveSessionStore {
     let entry = this.#entries.get(path);
     const fd = openSync(path, "r");
     try {
-      const size = fstatSync(fd).size;
-      if (!entry || size < entry.offset) entry = { offset: 0, remainder: "", state: newState() };
-      if (size > entry.offset) {
-        const bytes = Buffer.allocUnsafe(size - entry.offset);
-        readSync(fd, bytes, 0, bytes.length, entry.offset);
-        entry.offset = size;
-        const lines = (entry.remainder + bytes.toString("utf8")).split("\n");
+      const { size, dev, ino } = fstatSync(fd);
+      if (!entry || size < entry.offset || dev !== entry.dev || ino !== entry.ino) {
+        entry = { offset: 0, dev, ino, decoder: new StringDecoder("utf8"), remainder: "", state: newState() };
+      }
+      const bytes = Buffer.allocUnsafe(Math.min(64 * 1024, size - entry.offset));
+      while (entry.offset < size) {
+        const count = readSync(fd, bytes, 0, Math.min(bytes.length, size - entry.offset), entry.offset);
+        if (!count) break;
+        entry.offset += count;
+        const lines = (entry.remainder + entry.decoder.write(bytes.subarray(0, count))).split("\n");
         entry.remainder = lines.pop() || "";
         for (const line of lines) {
           if (!line.trim()) continue;

@@ -3,6 +3,7 @@ import { artifact, launchOptions } from './browser-runtime.mjs';
 
 const browser=await chromium.launch(launchOptions());
 const page=await browser.newPage({viewport:{width:1018,height:980},colorScheme:'dark'});
+await page.addInitScript(()=>{if(window===window.top)localStorage.setItem('codex-webui-locale','en')});
 const errors=[];
 page.on('pageerror',error=>errors.push(error.message));
 await page.goto(process.env.CODEX_WEBUI_TEST_URL||'http://127.0.0.1:8899',{waitUntil:'networkidle'});

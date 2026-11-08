@@ -1,12 +1,15 @@
 import { marked } from "marked";
 import katex from "katex";
+import createDOMPurify from "dompurify";
+
+let purifier, purifierWindow;
 
 const escapeHtml = (value = "") => String(value).replace(/[&<>"']/g, (char) => ({
   "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
 }[char]));
 
 const stash = (store, html) => {
-  const token = `\u0000CODEX${store.length}\u0000`;
+  const token = `\uE100CODEX${store.length}\uE101`;
   store.push(html);
   return token;
 };
@@ -95,12 +98,12 @@ function imageTitle(source = "") {
   catch { return name; }
 }
 
-export function renderImagePreview(source, { cwd = "", title = "", className = "" } = {}) {
+export function renderImagePreview(source, { cwd = "", title = "", className = "", caption = "" } = {}) {
   const src = imageSource(source, cwd, true);
   if (!src) return "";
   const reference = parseFileReference(source);
   const label = title || imageTitle(source);
-  return `<button type="button" class="message-image-button${className ? ` ${escapeHtml(className)}` : ""}" data-image-src="${escapeHtml(src)}" data-image-title="${escapeHtml(label)}"${reference ? ` data-image-path="${escapeHtml(reference.path)}"` : ""} aria-label="View image: ${escapeHtml(label)}"><img class="message-image" src="${escapeHtml(src)}" alt="${escapeHtml(title)}" loading="lazy" decoding="async"></button>`;
+  return `<button type="button" class="message-image-button${className ? ` ${escapeHtml(className)}` : ""}" data-image-src="${escapeHtml(src)}" data-image-title="${escapeHtml(label)}"${reference ? ` data-image-path="${escapeHtml(reference.path)}"` : ""} aria-label="View image: ${escapeHtml(label)}"${caption ? ` title="${escapeHtml(caption)}"` : ''}><img class="message-image" src="${escapeHtml(src)}" alt="${escapeHtml(title)}" loading="lazy" decoding="async">${caption ? `<span class="user-attachment-name">${escapeHtml(caption)}</span>` : ''}</button>`;
 }
 
 function attributeValue(attributes, name) {
@@ -252,8 +255,9 @@ function padCjkEmphasis(source = "") {
 }
 
 function sanitizeHtml(html) {
-  if (typeof window !== "undefined" && globalThis.DOMPurify) {
-    return globalThis.DOMPurify.sanitize(html, { ADD_ATTR: ["target", "rel"], FORBID_TAGS: ["style", "script", "iframe", "object", "embed"] });
+  if (typeof window !== "undefined" && window.document) {
+    if (purifierWindow !== window) { purifier = createDOMPurify(window); purifierWindow = window; }
+    return purifier.sanitize(html, { ADD_ATTR: ["target", "rel"], FORBID_TAGS: ["style", "script", "iframe", "object", "embed"], FORBID_ATTR: ["style"] });
   }
   return html
     .replace(/<(script|style|iframe|object|embed)\b[\s\S]*?<\/\1>/gi, (value) => escapeHtml(value))
@@ -269,7 +273,7 @@ export function renderAssistantMarkdown(source = "", { cwd = "" } = {}) {
   let html = marked.parse(text, { async: false });
   const localLinks = protectLocalProtocolLinks(html);
   html = localLinks.restore(sanitizeHtml(localLinks.html)).replace(/javascript\s*:/gi, "");
-  html = html.replace(/\u0000CODEX(\d+)\u0000/g, (_, index) => protectedBlocks[Number(index)] || "");
+  html = html.replace(/\uE100CODEX(\d+)\uE101/g, (_, index) => protectedBlocks[Number(index)] || "");
   return stripCjkSentinels(renderLinks(renderImages(html, cwd), cwd));
 }
 

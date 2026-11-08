@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdtempSync, rmSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { LiveSessionStore, parseRollout } from "../live-session-service.js";
@@ -101,4 +101,32 @@ describe("Desktop-style live session reader", () => {
       expect(store.read(path).turn.items).toHaveLength(2);
     } finally { rmSync(directory, { recursive: true, force: true }); }
   });
+});
+
+
+test("preserves Chinese characters split between incremental byte reads", () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-live-utf8-"));
+  const path = join(directory, "rollout.jsonl"), store = new LiveSessionStore();
+  try {
+    writeFileSync(path, line("event_msg", { type: "task_started", turn_id: "utf8" }));
+    const event = Buffer.from(line("response_item", { type: "message", id: "zh", role: "assistant", content: "正在处理中文附件" }));
+    const split = event.indexOf(Buffer.from("中文")) + 1;
+    appendFileSync(path, event.subarray(0, split)); store.read(path);
+    appendFileSync(path, event.subarray(split));
+    expect(store.read(path).turn.items[0].text).toBe("正在处理中文附件");
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("resets incremental state when a rollout file is replaced without shrinking", () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-live-replace-"));
+  const path = join(directory, "rollout.jsonl"), replacement = join(directory, "new.jsonl"), store = new LiveSessionStore();
+  try {
+    writeFileSync(path, line("event_msg", { type: "task_started", turn_id: "old" }));
+    expect(store.read(path).turn.id).toBe("old");
+    writeFileSync(replacement, line("event_msg", { type: "task_started", turn_id: "new" }));
+    renameSync(replacement, path);
+    expect(store.read(path).turn.id).toBe("new");
+    writeFileSync(path, "");
+    expect(store.read(path)).toMatchObject({ active: false, turn: null });
+  } finally { rmSync(directory, { recursive: true, force: true }); }
 });

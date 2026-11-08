@@ -6,9 +6,10 @@ import { createPasswordSession, createStoredPassword, isAllowedBrowserRpcMethod,
 
 describe("WebUI server security boundary", () => {
   test("allows only the RPC methods used by the browser client", () => {
-    for (const method of ["model/list", "permissionProfile/list", "account/logout", "thread/list", "thread/read", "thread/delete", "thread/resume", "thread/turns/list", "host/thread/live", "thread/start", "turn/start", "turn/steer", "turn/interrupt"]) {
+    for (const method of ["model/list", "permissionProfile/list", "account/logout", "thread/list", "thread/read", "thread/goal/get", "thread/goal/set", "thread/goal/clear", "thread/delete", "thread/resume", "thread/turns/list", "host/thread/live", "thread/start", "turn/start", "turn/steer", "turn/interrupt"]) {
       expect(isAllowedBrowserRpcMethod(method)).toBe(true);
     }
+    for (const method of ["thread/compact/start", "thread/fork", "thread/name/set", "thread/archive", "thread/unarchive", "host/thread/pin"]) expect(isAllowedBrowserRpcMethod(method)).toBe(true);
     for (const method of ["fs/readFile", "fs/writeFile", "fs/remove", "fs/copy", "config/read", "account/read", "skills/list"]) {
       expect(isAllowedBrowserRpcMethod(method)).toBe(false);
     }

@@ -1,8 +1,15 @@
 // Exact Lucide 0.456.0 icon nodes extracted from Codex.app's app.asar.
 // Lucide is ISC licensed; see THIRD_PARTY_NOTICES.md in this project.
 export const codexIconNodes = {
+  archive: '<rect width="20" height="5" x="2" y="3" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"/><path d="M10 12h4"/>',
+  archiveRestore: '<rect width="20" height="5" x="2" y="3" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"/><path d="m9 14 3-3 3 3"/><path d="M12 11v6"/>',
+  squarePen: '<path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4Z"/>',
+  pencil: '<path d="m16 3 5 5"/><path d="M18.5 2.5a2.1 2.1 0 0 1 3 3L7 20l-5 2 2-5Z"/>',
+  pin: '<path d="M16 3H8l1 7-4 4v2h14v-2l-4-4 1-7Z"/><path d="M12 16v6"/>',
+  pinOff: '<path d="m2 2 20 20"/><path d="M16 3H8l1 5"/><path d="m15 7-.4 3.2 4.4 4.3V16h-3"/><path d="m9 10-4 4v2h7v6"/>',
   arrowUp: '<path d="m5 12 7-7 7 7"/><path d="M12 19V5"/>',
   check: '<path d="M20 6 9 17l-5-5"/>',
+  copy: '<rect width="14" height="14" x="8" y="8" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>',
   circleHelp: '<circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 1 1 5.83 1c0 2-3 3-3 3"/><path d="M12 17h.01"/>',
   command: '<path d="M18 9a3 3 0 1 0-3-3v12a3 3 0 1 0 3-3H6a3 3 0 1 0 3 3V6a3 3 0 1 0-3 3Z"/>',
   chevronDown: '<path d="m6 9 6 6 6-6"/>',

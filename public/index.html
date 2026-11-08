@@ -23,7 +23,15 @@
     <button id="passwordLoginButton" type="submit">Log in</button>
   </form>
 </section>
-<div id="app" class="app-shell">
+<section class="startup-screen" id="startupScreen" role="status" aria-label="Connecting to Codex" aria-busy="true">
+  <span id="startupCodexMark"><span class="empty-codex-mark empty-codex-placeholder" aria-hidden="true"></span></span>
+  <div class="startup-error" id="startupError" role="alert" hidden>
+    <p>Unable to load Codex</p>
+    <small id="startupErrorDetail" data-i18n-ignore></small>
+    <button id="startupRetry" type="button">Retry</button>
+  </div>
+</section>
+<div id="app" class="app-shell" data-loading aria-busy="true" aria-hidden="true" inert>
   <header class="topbar">
     <div class="window-brand"><span id="windowCodexMark"></span><strong>Codex</strong></div>
     <div class="thread-heading"><span id="threadTitle">New task</span><span id="threadPath"></span></div>
@@ -38,8 +46,9 @@
   <aside class="sidebar" id="sidebar">
     <div class="sidebar-top">
       <div class="sidebar-mode-row">
-        <button class="sidebar-product" id="productModeButton" type="button" aria-label="Switch mode, current mode: Codex"><strong>Codex</strong><span class="icon-slot chevron" data-icon="chevronDown"></span></button>
+        <div class="sidebar-product" id="productTitle"><strong>Codex Web UI</strong></div>
         <button class="sidebar-toolbar-button" id="sidebarSearchButton" type="button" title="Search" aria-label="Search chats" aria-expanded="false" aria-controls="sidebarSearchPanel"><span class="icon-slot" data-icon="search"></span></button>
+        <button class="sidebar-toolbar-button sidebar-close" id="closeSidebar" type="button" title="Close sidebar" aria-label="Close sidebar" aria-controls="sidebar"><span class="icon-slot" data-icon="panelLeft"></span></button>
       </div>
       <div class="sidebar-search-panel" id="sidebarSearchPanel" hidden>
         <label class="sidebar-search-field"><span class="icon-slot" data-icon="search"></span><input id="threadSearch" type="search" placeholder="Search chats" aria-label="Search chats"></label>
@@ -48,10 +57,21 @@
       <button class="sidebar-row new-task" id="newTask"><span class="icon-slot" data-icon="plus"></span><span>New chat</span><kbd>⌘K</kbd></button>
     </div>
     <div class="sidebar-scroll">
-      <span id="projectName" hidden>codex-webui</span><span id="projectPath" hidden>~/projects/codex-webui</span>
-      <button class="sidebar-row projects-button" id="projectButton" type="button"><span class="icon-slot" data-icon="folderOpen"></span><span>Projects</span></button>
+      <span id="projectName" hidden></span><span id="projectPath" hidden></span>
+      <section id="pinnedThreadsSection" hidden>
+        <div class="sidebar-section-label"><span class="icon-slot" data-icon="pin"></span><span>Pinned</span></div>
+        <div class="thread-list" id="pinnedThreadList"></div>
+      </section>
+      <div class="projects-heading">
+        <button class="sidebar-row projects-button" id="projectButton" type="button"><span class="icon-slot" data-icon="folderOpen"></span><span>Projects</span></button>
+        <button class="sidebar-toolbar-button project-add-button" id="newProjectButton" type="button" title="New project" aria-label="New project" aria-haspopup="dialog" aria-controls="folderDialog"><span class="icon-slot" data-icon="plus" aria-hidden="true"></span></button>
+      </div>
       <div class="thread-list" id="threadList"><div class="list-state">Connecting to Codex…</div></div>
     </div>
+    <section class="archive-section">
+      <button class="sidebar-row archive-toggle" id="archiveThreadsButton" type="button" aria-expanded="false" aria-controls="archivedThreadList"><span class="icon-slot" data-icon="archive"></span><span>Archive</span><span class="icon-slot sidebar-section-chevron" data-icon="chevronRight"></span></button>
+      <div class="thread-list" id="archivedThreadList" hidden></div>
+    </section>
     <div class="sidebar-footer">
       <div class="account-menu" id="accountMenu" hidden>
         <div class="account-menu-identity"><span class="account-menu-avatar account-initials" id="accountMenuAvatar">?</span><span><strong id="accountMenuName">Settings</strong><small id="accountMenuSubtitle"></small></span></div>
@@ -82,14 +102,26 @@
 
   <main class="conversation-shell">
     <section class="conversation" id="conversation">
-      <div class="empty-state" id="emptyState">
-        <span id="emptyCodexMark"></span>
-        <h1>What can I help?</h1>
+      <div class="empty-state connecting" id="emptyState" role="status" aria-label="Connecting to Codex" aria-busy="true">
+        <span id="emptyCodexMark"><span class="empty-codex-mark empty-codex-placeholder" aria-hidden="true"></span></span>
       </div>
     </section>
     <div class="composer-dock">
       <form class="composer" id="composer">
         <div class="composer-autocomplete" id="composerAutocomplete" role="listbox" aria-label="Composer suggestions" hidden></div>
+        <div class="goal-picker" id="goalPicker" hidden>
+          <button type="button" class="goal-trigger" id="goalButton" aria-haspopup="menu" aria-expanded="false" aria-controls="goalMenu">
+            <span id="goalStatusIcon" aria-hidden="true"></span><span id="goalStatusLabel" aria-live="polite"></span><span class="goal-objective-preview" id="goalObjectivePreview" data-i18n-ignore></span><span class="icon-slot chevron" data-icon="chevronDown"></span>
+          </button>
+          <div class="goal-menu" id="goalMenu" role="menu" aria-label="Goal actions" hidden>
+            <p class="goal-menu-objective" id="goalMenuObjective" data-i18n-ignore></p>
+            <button type="button" role="menuitem" id="goalEdit"><span class="icon-slot" data-icon="file"></span><span>Edit goal</span></button>
+            <button type="button" role="menuitem" id="goalPause"><span class="icon-slot" data-icon="square"></span><span>Pause goal</span></button>
+            <button type="button" role="menuitem" id="goalResume" hidden><span class="icon-slot" data-icon="refreshCw"></span><span>Resume goal</span></button>
+            <button type="button" role="menuitem" id="goalDelete"><span class="icon-slot" data-icon="trash"></span><span>Delete goal</span></button>
+          </div>
+        </div>
+        <p class="goal-error" id="goalError" role="alert" hidden></p>
         <div class="composer-context-tray" id="composerContextTray" aria-label="Attached context" hidden></div>
         <input id="attachmentPicker" type="file" multiple hidden>
         <div id="composerAttachmentTray" class="composer-attachment-tray" aria-label="Attachments" aria-live="polite" hidden></div>
@@ -104,13 +136,14 @@
                 <div class="permission-options" id="permissionOptions"></div>
               </div>
             </div>
+
+          </div>
+          <div class="composer-right">
             <div class="model-picker composer-model-control" id="modelPicker" data-composer-control="model">
-              <button type="button" class="composer-text-button model-trigger" id="modelButton" data-codex-intelligence-trigger aria-haspopup="menu" aria-expanded="false"><span id="modelLabel">Loading models…</span><span id="effortLabel">Medium</span><span class="icon-slot chevron" data-icon="chevronDown"></span></button>
+              <button type="button" class="composer-text-button model-trigger" id="modelButton" data-codex-intelligence-trigger aria-haspopup="menu" aria-expanded="false"><span id="modelLabel">Loading models…</span><span id="effortLabel" data-i18n-ignore>Medium</span><span class="icon-slot chevron" data-icon="chevronDown"></span></button>
               <div class="model-menu" id="modelMenu" role="menu" hidden></div>
               <select id="effortSelect" class="sr-only" aria-label="Reasoning effort"><option value="medium">medium</option></select>
             </div>
-          </div>
-          <div class="composer-right">
             <span class="context-usage" id="contextUsage" role="img" tabindex="0" aria-label="Context usage" hidden>
               <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">
                 <circle class="context-usage-track" cx="6" cy="6" r="5" pathLength="100"></circle>
@@ -283,6 +316,35 @@
       <section class="settings-page" data-settings-content="placeholder" hidden><header class="settings-page-heading"><button class="settings-mobile-back icon-button" type="button" aria-label="Back to settings"><span class="icon-slot" data-icon="chevronLeft"></span></button><h1 id="settingsPlaceholderTitle"></h1></header><small id="settingsPlaceholderDescription" hidden></small><div id="settingsPlaceholderRows"></div></section>
     </main>
   </div>
+</dialog>
+<div class="thread-actions-menu" id="threadActionsMenu" role="menu" aria-label="Chat actions" hidden>
+  <button type="button" role="menuitem" data-thread-action="rename"><span class="icon-slot" data-icon="pencil"></span><span>Rename</span></button>
+  <button type="button" role="menuitem" data-thread-action="archive"><span class="icon-slot" data-icon="archive"></span><span>Archive chat</span></button>
+  <button type="button" role="menuitem" class="danger" data-thread-action="delete"><span class="icon-slot" data-icon="trash"></span><span>Delete</span></button>
+</div>
+<div class="thread-actions-menu" id="projectActionsMenu" role="menu" aria-label="Project actions" hidden>
+  <button type="button" role="menuitem" data-project-action="archive"><span class="icon-slot" data-icon="archive"></span><span>Archive project</span></button>
+  <button type="button" role="menuitem" class="danger" data-project-action="delete"><span class="icon-slot" data-icon="trash"></span><span>Delete project</span></button>
+</div>
+<dialog class="rename-thread-dialog" id="renameThreadDialog" aria-labelledby="renameThreadTitle" aria-describedby="renameThreadHint">
+  <form id="renameThreadForm" novalidate>
+    <div class="rename-thread-heading"><h2 id="renameThreadTitle">Rename chat</h2><button class="icon-button" id="renameThreadClose" type="button" aria-label="Close rename dialog"><span class="icon-slot" data-icon="x"></span></button></div>
+    <p id="renameThreadHint">Keep it short and easy to recognize</p>
+    <label class="sr-only" for="renameThreadName">Chat name</label>
+    <input id="renameThreadName" name="name" type="text" maxlength="512" autocomplete="off" aria-describedby="renameThreadError" data-i18n-ignore>
+    <p class="rename-thread-error" id="renameThreadError" role="alert" hidden></p>
+    <div class="rename-thread-actions"><button id="renameThreadCancel" type="button">Cancel</button><button class="rename-thread-save" id="renameThreadSave" type="submit">Save</button></div>
+  </form>
+</dialog>
+<dialog class="goal-dialog" id="goalDialog" aria-labelledby="goalDialogTitle">
+  <form id="goalForm" class="goal-form">
+    <h2 id="goalDialogTitle">Set goal</h2>
+    <label for="goalObjective">Goal</label>
+    <textarea id="goalObjective" name="objective" rows="5" maxlength="4000" required placeholder="Describe the outcome and how to verify it" aria-describedby="goalHint goalDialogError"></textarea>
+    <p class="goal-hint" id="goalHint">Codex keeps working toward this goal until it is achieved or paused.</p>
+    <p class="goal-error" id="goalDialogError" role="alert" hidden></p>
+    <div class="goal-dialog-actions"><button type="button" id="goalCancel">Cancel</button><button type="submit" class="goal-save" id="goalSave">Start goal</button></div>
+  </form>
 </dialog>
 <dialog class="permission-confirm-dialog" id="fullAccessDialog" aria-labelledby="fullAccessTitle">
   <form method="dialog" class="permission-confirm-card">

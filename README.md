@@ -1,269 +1,128 @@
 # Codex WebUI
 
 <p align="center">
-  <strong>A local, LAN-accessible WebUI for the real Codex app-server.</strong>
+  <strong>由真实 Codex app-server 驱动、可在浏览器中使用的本地 WebUI。</strong>
 </p>
 
 <p align="center">
-  <a href="./README-zh.md">简体中文</a> ·
-  <a href="./CONTRIBUTING.md">Contributing</a> ·
-  <a href="./SECURITY.md">Security</a>
-</p>
-
-<p align="center">
-  <a href="./LICENSE"><img alt="MIT License" src="https://img.shields.io/github/license/lezi-fun/codex-webui?style=flat-square"></a>
-  <a href="https://github.com/lezi-fun/codex-webui/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/lezi-fun/codex-webui?style=flat-square"></a>
-  <a href="https://github.com/lezi-fun/codex-webui/issues"><img alt="GitHub issues" src="https://img.shields.io/github/issues/lezi-fun/codex-webui?style=flat-square"></a>
-  <a href="https://bun.sh/"><img alt="Bun 1.3 or newer" src="https://img.shields.io/badge/Bun-1.3%2B-fbf0df?style=flat-square&amp;logo=bun&amp;logoColor=000"></a>
+  <a href="./CONTRIBUTING.md">贡献指南</a> ·
+  <a href="./SECURITY.md">安全政策</a> ·
+  <a href="./LICENSE">MIT 许可证</a>
 </p>
 
 > [!IMPORTANT]
-> This is an **unofficial community project**. It is not affiliated with, endorsed by, or maintained by OpenAI. OpenAI and Codex are trademarks of their respective owners.
+> 这是一个非官方社区项目，与 OpenAI 没有隶属或维护关系。Codex 及相关标识归各自权利人所有。
 
-Codex WebUI connects directly to `codex app-server --stdio` and exposes the local Codex experience through a responsive browser interface. It keeps real threads, models, streaming responses, tool activity, approval requests, diffs, and token usage instead of simulating them in a static frontend.
+本项目直接连接 `codex app-server --stdio`，模型、历史会话、流式回复、工具调用和审批均由真实 Codex CLI 提供。关闭浏览器后任务仍可继续；停止或重启 WebUI 服务会中断它管理的后台任务。
 
-![Codex WebUI desktop screenshot](./docs/assets/overview.png)
+![Codex WebUI 桌面截图](./docs/assets/overview.png)
 
-## Highlights
+## 主要功能
 
-- Real `codex app-server --stdio` bridge over WebSocket
-- Real model catalog, reasoning effort options, threads, and streaming turns
-- Command, file-change, network, and permission approval surfaces
-- Approval scopes such as **Allow once**, **Allow similar commands**, and session-level approval
-- Tool activity states driven by real item/turn notifications
-- Unified and split diff review, word wrap, expand/collapse, Undo, and Reapply
-- Safe Markdown, GFM, fenced code blocks, links, and KaTeX rendering
-- Project-folder picker with restricted filesystem browsing
-- Codex-style sidebar account identity with display name, same-origin avatar fallback, and plan
-- Codex Desktop-style 46px header with separate Bottom Panel, Summary, and Task Side Panel controls; the Bottom Panel opens its native-style New tab launcher
-- Real Bottom Panel PTY terminal powered by xterm.js, with 256-color ANSI output, terminal resize, and interactive Vim/control-key support
-- Collapsed-by-default Summary panel matching the native Environment, Scheduled, Computer Use, Plan, Side tasks, and Sources sections; app-server data is shown when available and native-store-only sections use explicit unavailable or empty states instead of fabricated content
-- Collapsed-by-default Task Side Panel mirroring the native New tab launcher: Review opens the real diff, Files links to the restricted project picker, and its native-bridge-only Terminal, Browser, and Side task entries show an explicit availability notice instead of a simulated tool
-- Light and dark surfaces driven by shared Codex-style color tokens, including the monochrome transparent Codex Knot
-- Windowed long conversations instead of rendering thousands of turns at once
-- Responsive desktop and mobile layouts with full-screen Summary and Task Side Panel drawers on phones
-- Localhost-only by default; authenticated LAN access is opt-in
+- 流式对话、模型和推理强度选择、上下文用量、Markdown 与 LaTeX 渲染。
+- 工具活动、权限审批、错误和重试提示，以及 Unified / Split Diff、Undo / Reapply。
+- 项目和会话管理：置顶、重命名、分支、归档、还原和删除。
+- 图片与文件上传、粘贴、多附件预览，以及上传目录内的引用检查和清理。
+- `/goal` 目标管理、`/compact` 上下文压缩，任务执行中可追加引导消息或按 Esc 停止。
+- 本地 PTY 终端、浅色/深色主题、桌面和移动端布局。
 
-## Requirements
+普通分支是独立会话，删除原会话会保留其分支；代理创建的子任务按 Codex 原生逻辑连带删除。删除整个项目会删除该项目内的全部会话，但保留其他项目中的独立分支，工作目录中的文件不会删除。
 
-- [Bun](https://bun.sh/) 1.3 or newer
-- Node.js 20 or newer, used by the native PTY worker
-- [OpenAI Codex CLI](https://www.npmjs.com/package/@openai/codex), installed and authenticated
-- Git, for Review Undo/Reapply
-- macOS or Linux recommended; Windows has not been fully tested
+## 环境要求
 
-Install Codex CLI if needed:
+- [Bun](https://bun.sh/) 1.3+、Node.js 20+（PTY worker）、Git（Review）。
+- 已安装并登录的 [Codex CLI](https://www.npmjs.com/package/@openai/codex)。协议功能取决于 CLI 版本，建议保持更新。
+- 推荐 Linux / macOS；Windows 建议在 WSL2 中运行。
 
 ```bash
 npm install -g @openai/codex
 codex
 ```
 
-Complete the Codex sign-in flow before starting this project.
-
-## Quick start
+## 快速开始
 
 ```bash
-git clone https://github.com/lezi-fun/codex-webui.git
-cd codex-webui
+git clone https://github.com/uEternali/my-codex-webui.git
+cd my-codex-webui
 bun install
 bun run start
 ```
 
-Open:
+打开 `http://127.0.0.1:8899`，选择项目工作目录即可开始。默认只监听本机。
 
-```text
-http://127.0.0.1:8899
-```
-
-The default bind address is localhost. Use the folder button in the composer or sidebar to select the project Codex should work in.
-
-### LAN password login
-
-To listen on your LAN, start the server without an authentication variable:
+### 局域网访问
 
 ```bash
 HOST=0.0.0.0 bun run start
 ```
 
-The first LAN browser sees a password setup screen. After a password of at least 12 characters is confirmed, Codex WebUI stores only a salted `scrypt` credential in `~/.codex/codex-webui-auth.json`, signs in that browser, and requires the password after a restart. Because the first reachable LAN client can claim this setup, complete it only on a trusted network.
-
-For unattended deployments, provide the password at startup instead:
+未配置认证变量时，首个局域网访问者需设置至少 12 位的密码；加盐后的凭据保存在 `$CODEX_HOME/codex-webui-auth.json`。请在可信网络中完成初始化。也可通过环境变量预设密码：
 
 ```bash
-HOST=0.0.0.0 CODEX_WEBUI_PASSWORD='use-a-long-random-password' bun run start
+HOST=0.0.0.0 CODEX_WEBUI_PASSWORD='replace-with-a-long-random-password' bun run start
 ```
 
-Direct `localhost` access remains available without the password screen. LAN requests must set or enter a password before the main application bundle, HTTP APIs, or WebSocket bridges are available. Successful authentication uses a signed `HttpOnly`, `SameSite=Strict` session cookie.
+认证使用 `HttpOnly`、`SameSite=Strict` 会话 Cookie；localhost 请求可直接访问。
 
-`CODEX_WEBUI_ACCESS_TOKEN` remains available for compatibility with Basic/Bearer clients. `CODEX_WEBUI_PASSWORD` takes precedence over both the managed password and access token for browser login. Set `CODEX_WEBUI_AUTH_STORE` to move the managed credential file.
+## 配置
 
-## Configuration
+参考 [.env.example](./.env.example)。Bun 从项目目录启动时会加载 `.env`，也可显式导出环境变量。
 
-Copy the example file if you want custom settings:
-
-```bash
-cp .env.example .env
-```
-
-Bun does not automatically load every `.env` convention in all execution contexts, so exporting variables explicitly is the most predictable option:
-
-```bash
-export HOST=0.0.0.0
-export PORT=8899
-export CODEX_WEBUI_ACCESS_TOKEN="$(openssl rand -hex 32)"
-export CODEX_WEBUI_CWD="$HOME/projects/my-project"
-export CODEX_WEBUI_REVIEW_ROOT="$HOME/projects/my-project"
-bun run start
-```
-
-| Variable | Default | Description |
+| 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `HOST` | `127.0.0.1` | HTTP/WebSocket bind address |
-| `PORT` | `8899` | HTTP/WebSocket port |
-| `CODEX_WEBUI_PASSWORD` | unset | Optional browser login password for LAN access; bypasses first-run setup |
-| `CODEX_WEBUI_AUTH_STORE` | `$CODEX_HOME/codex-webui-auth.json` | Salted managed password credential created by first-run setup |
-| `CODEX_WEBUI_ACCESS_TOKEN` | unset | Compatibility secret for Basic/Bearer clients and browser login when no password is configured; username `codex` |
-| `CODEX_WEBUI_CWD` | repository directory | Initial Codex working directory |
-| `CODEX_WEBUI_REVIEW_ROOT` | `CODEX_WEBUI_CWD` | Exact Git root allowed for Undo/Reapply |
-| `CODEX_HOME` | `~/.codex` | Codex state directory containing `auth.json` |
-| `CODEX_AUTH_PATH` | `$CODEX_HOME/auth.json` | Optional explicit Codex authentication file path |
-| `PLAYWRIGHT_EXECUTABLE_PATH` | auto-detected | Optional Chrome/Edge path for browser tests |
+| `HOST` / `PORT` | `127.0.0.1` / `8899` | 监听地址和端口 |
+| `CODEX_WEBUI_PASSWORD` | 未设置 | 浏览器登录密码 |
+| `CODEX_WEBUI_AUTH_STORE` | `$CODEX_HOME/codex-webui-auth.json` | 本地密码凭据文件 |
+| `CODEX_WEBUI_ACCESS_TOKEN` | 未设置 | Basic / Bearer 兼容密钥；未设密码时也可用于浏览器登录 |
+| `CODEX_WEBUI_SESSION_COOKIE` | `codex_webui_session` | 同一主机运行多个实例时，使用不同名称隔离登录 |
+| `CODEX_WEBUI_CWD` | 仓库目录 | 初始工作目录 |
+| `CODEX_WEBUI_REVIEW_ROOT` | 与 `CODEX_WEBUI_CWD` 相同 | 允许 Undo / Reapply 的 Git 根目录 |
+| `CODEX_HOME` | `~/.codex` | Codex 配置、认证和会话目录 |
+| `CODEX_AUTH_PATH` | `$CODEX_HOME/auth.json` | 可选认证文件路径 |
+| `CODEX_WEBUI_UPLOAD_DIR` | `$CODEX_HOME/codex-webui-uploads` | 图片和文件上传目录；可独立设置为缓存目录 |
+| `PLAYWRIGHT_EXECUTABLE_PATH` | 自动检测 | 浏览器测试使用的 Chrome / Edge 路径 |
 
-## Security model
+开发和生产应分别配置端口、`CODEX_HOME` 和 Cookie 名称。上传目录可以共用，引用索引按 `CODEX_HOME` 隔离；迁移时保留附件和引用索引，避免历史附件链接失效。
 
-Codex WebUI can approve command execution and file changes on your machine. Treat it like a local developer tool with shell access.
+上传文件采用 `UUID + 原文件名`。移除待发送附件或永久删除会话时，服务会检查其他会话、分支和已登记环境的引用，仅清理上传目录内不再使用的文件；归档不删除附件。无法确认引用时保留文件，不按固定期限自动清理历史附件。
 
-- Do **not** expose port `8899` directly to the public Internet.
-- The default listener is `127.0.0.1`. A non-localhost listener requires first-run password setup, `CODEX_WEBUI_PASSWORD`, or `CODEX_WEBUI_ACCESS_TOKEN` before protected HTTP and WebSocket requests are accepted.
-- Browser RPC uses an explicit allowlist and cannot invoke app-server `fs/*`, `config/*`, or account methods.
-- Static serving uses an asset allowlist and rejects symbolic links.
-- Filesystem browsing canonicalizes paths and rejects symlinks that escape the user's home directory.
-- Review Undo/Reapply uses server-owned app-server diffs, rejects client-supplied `cwd`/diff data, symbolic-link patches, and sensitive targets such as `.git`, `.env`, and `node_modules`.
-- Read approval prompts before allowing commands.
-- Account identity combines app-server `account/read` data with Codex's authenticated profile endpoint. It is available only through direct localhost access; LAN clients receive the neutral Settings fallback. Email and raw avatar URLs are not exposed, avatars use a same-origin allowlisted proxy, and `auth.json` tokens remain server-only.
-- Never paste credentials into issues, screenshots, or public logs.
+## 开发与测试
 
-See [SECURITY.md](./SECURITY.md) for the reporting policy.
-
-## Review and approvals
-
-The WebUI handles app-server requests instead of drawing fake approval cards:
-
-- `item/commandExecution/requestApproval`
-- `item/fileChange/requestApproval`
-- `item/permissions/requestApproval`
-
-Review data is driven by `turn/diff/updated`. Unified diffs are parsed into files and hunks, and the Review panel supports:
-
-- Unified / Split view
-- Word wrapping
-- Expand / Collapse all
-- Git-backed Undo (`git apply --reverse`)
-- Git-backed Reapply (`git apply`)
-
-Undo/Reapply is deliberately restricted to the configured repository root.
-
-The shell mirrors Codex Desktop's separate Bottom Panel, Summary, and Task Side Panel controls. The Bottom Panel provides a real authenticated local PTY terminal, while the app-server bridge provides the Review flow and restricted local project selection. Native Desktop-only Task Side Panel Terminal, embedded Browser, and Side task tabs remain visible for structural parity but show a clear unavailable message instead of simulating those capabilities.
-
-## Architecture
-
-```mermaid
-flowchart LR
-    Browser[Browser UI] <-->|WebSocket JSON-RPC| Server[Bun HTTP + WS server]
-    Server <-->|stdio JSON-RPC| Codex[codex app-server]
-    Browser <-->|Authenticated terminal WebSocket| PTY[Node PTY worker]
-    PTY <-->|xterm-256color| Shell[Local login shell]
-    Browser -->|Folder API| Server
-    Browser -->|Review patch API| Server
-    Server -->|git apply / reverse| Repo[Local Git repository]
-```
-
-Main files:
-
-| Path | Responsibility |
-| --- | --- |
-| `server.ts` | HTTP server, WebSocket bridge, app-server process, folder/config/review APIs |
-| `public/app.js` | Browser state, RPC, threads, approvals, activity, Review, project selection |
-| `public/codex-surfaces.js` | Approval models, unified-diff parsing, split alignment, activity summaries |
-| `public/rendering.js` | Sanitized Markdown and KaTeX rendering |
-| `folder-service.js` | Restricted directory browsing |
-| `review-service.js` | Validated Git Undo/Reapply operations |
-| `tests/` | Unit, integration, browser, mobile, and real approval tests |
-
-`public/app.bundle.js` is generated automatically when the server starts and is not committed.
-
-During development, `bun run dev` watches both `server.ts` and the browser entry graph rooted at `public/app.js`. Backend changes restart the server, while frontend changes rebuild `public/app.bundle.js`; reload the page to use the new bundle.
-
-Build the browser bundle and a runnable `dist/server.js`:
+源码主要位于 `server.ts`、根目录的服务模块和 `public/`；`tests/` 包含单元和浏览器测试。
 
 ```bash
-bun run build
-bun dist/server.js
+bun run dev        # 监听源码，前端重建、后端重启
+bun run build      # 生成 public/app.bundle.js 和 dist/server.js
+bun run test:unit  # 单元测试
+bun run check     # 构建检查
 ```
 
-## Docker
+构建后可用 `bun dist/server.js` 启动。`node_modules/`、浏览器 Bundle 和 `dist/` 为安装或构建产物，不手工修改。
 
-The repository includes a Compose setup for a local container deployment. Set `CODEX_BIN` to an executable Codex CLI path before starting it; the path is mounted read-only into the container. The app starts in projectless mode by default and stores Codex state through the configured volume.
+浏览器测试需要兼容的 Chromium 浏览器，必要时先运行 `bunx playwright install chromium`。`bun run test:browser` 包含独立模拟服务测试，也有连接运行中服务的测试；通过 `CODEX_WEBUI_TEST_URL` 指向专用测试实例。`test:integration` 和 `test:e2e` 中部分测试需要已登录的真实 Codex，避免对生产实例执行这些测试。
 
-```bash
-export CODEX_BIN="$HOME/.codex/packages/standalone/releases/VERSION/bin/codex"
-export CODEX_WEBUI_REVIEW_ROOT="$HOME/projects/my-project"
-docker compose up -d --build
-```
+## 安全与限制
 
-The Compose example does not mount the host Docker socket. The image runs as the configured `PUID`/`PGID` user and receives runtime configuration through environment variables.
+- 本工具可执行命令、修改文件和操作终端，应按 Shell 工具管理访问权限；远程访问建议使用可信内网、VPN 或 SSH 隧道。
+- HTTP / WebSocket 有认证和 Origin 校验，文件访问、目录浏览、Review 和附件清理有路径边界检查；这些边界不能替代 Codex 自身的权限审批。
+- 不要公开密码、密钥、`auth.json`、会话记录或运行日志。漏洞报告见 [SECURITY.md](./SECURITY.md)。
+- app-server 协议持续演进；部分原生桌面能力在浏览器中不可用，Review 暂不支持逐 Hunk 应用。
 
-## Testing
+## 版本记录
 
-Install Playwright's Chromium if you do not already have a compatible Chrome/Edge binary:
+### 1108（2026-11-08）
 
-```bash
-bunx playwright install chromium
-```
+- **界面与交互**：优化导航、加载状态、模型和输入框布局，统一按钮与菜单样式；左上角显示静态的 Codex Web UI 标题。
+- **对话体验**：优化消息气泡、即时反馈和引导消息顺序；显示处理状态、错误及重试、完成时间，支持复制原文和从指定回复创建分支。
+- **会话管理**：增加项目新建与批量操作、会话重命名和置顶、归档还原；刷新保持当前窗口的会话，直接打开首页进入新对话。
+- **附件**：完善输入法、多文件粘贴和上传取消；统一图片缩略图与文件卡片，永久删除会话时安全清理不再引用的附件。
+- **命令支持**：完善 `/goal` 的创建、修改、暂停、继续、删除，以及 `/compact` 的执行状态和异常反馈。
+- **稳定性**：修复历史增量读取的中文字符边界、置顶和分支分页丢行、重复提交与切换会话竞态；恢复长会话分批渲染和 SSE 重连状态同步，启用 DOMPurify 清理 Markdown HTML。
 
-Run the portable unit suite:
+后续版本在此追加记录。
 
-```bash
-bun run test:unit
-```
+## 许可证与来源
 
-Check both Bun and browser bundles:
+源码采用 [MIT License](./LICENSE)。品牌资源及第三方组件适用各自条款，详见 [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md)。
 
-```bash
-bun run check
-```
-
-With a running server:
-
-```bash
-bun run test:browser
-```
-
-Tests that require a working, authenticated Codex installation:
-
-```bash
-bun run test:integration
-bun run test:e2e
-```
-
-The real approval E2E asks Codex to execute a harmless command, waits for the actual approval request, clicks **Allow once**, verifies the result, and cleans up its temporary file.
-
-## Codex visual assets
-
-The repository currently includes Codex-style brand and motion assets extracted from a local Codex.app installation to reproduce the desktop experience. Their source and status are documented in [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md). These assets are not covered by this repository's MIT license and may be removed or replaced if requested by the relevant rights holder.
-
-## Known limitations
-
-- The Codex app-server protocol is evolving and may change between CLI versions.
-- Browser tests need a compatible Chromium browser.
-- Undo/Reapply currently operates on the complete aggregated diff, not one hunk at a time.
-- Authentication and public-Internet deployment are intentionally out of scope.
-
-## Contributing
-
-Please read [CONTRIBUTING.md](./CONTRIBUTING.md) before submitting a pull request. Bug reports and feature requests can be opened through the repository's Issue templates.
-
-## License
-
-Source code is available under the [MIT License](./LICENSE). Third-party components and optional local assets are covered by their own licenses and terms; see [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md).
+本项目基于 [lezi-fun/codex-webui](https://github.com/lezi-fun/codex-webui) 继续开发，感谢原作者及贡献者。当前 Fork：[uEternali/my-codex-webui](https://github.com/uEternali/my-codex-webui)。

@@ -6,6 +6,7 @@ import { launchOptions } from './browser-runtime.mjs';
 const base=process.env.CODEX_WEBUI_TEST_URL||'http://127.0.0.1:8899';
 const browser=await chromium.launch(launchOptions());
 const page=await browser.newPage({viewport:{width:1280,height:760},colorScheme:'dark'});
+await page.addInitScript(()=>{if(window===window.top)localStorage.setItem('codex-webui-locale','en')});
 const errors=[];
 page.on('pageerror',error=>errors.push(error.message));
 async function waitForTerminalOutput(kind,expected){
@@ -90,7 +91,7 @@ await page.click('.side-task-card');
 await page.waitForFunction(()=>globalThis.__codexWebuiDebug.state.active?.id==='child-thread'&&document.querySelector('.assistant-response .message-text')?.textContent.includes('Child task result'));
 const sideTaskNavigation=await page.evaluate(()=>({
   activeId:globalThis.__codexWebuiDebug.state.active?.id,
-  storedId:localStorage.getItem('codex-webui-active-thread'),
+  routeId:new URLSearchParams(location.search).get('thread'),
   heading:document.querySelector('#threadTitle')?.textContent.trim(),
   response:document.querySelector('.assistant-response .message-text')?.textContent.trim(),
 }));
@@ -103,7 +104,7 @@ await page.click('.side-task-card[data-thread-id="missing-child-thread"]');
 await page.waitForFunction(()=>document.querySelector('#toast')?.classList.contains('show'));
 const failedSideTaskNavigation=await page.evaluate(()=>({
   activeId:globalThis.__codexWebuiDebug.state.active?.id,
-  storedId:localStorage.getItem('codex-webui-active-thread'),
+  routeId:new URLSearchParams(location.search).get('thread'),
   heading:document.querySelector('#threadTitle')?.textContent.trim(),
   toast:document.querySelector('#toast')?.textContent.trim(),
   disabled:document.querySelector('.side-task-card[data-thread-id="missing-child-thread"]')?.disabled,
@@ -123,6 +124,6 @@ await browser.close();
 if(errors.length||!terminal.panelVisible||!terminal.hostVisible||terminal.connected!=='true'||terminal.title!=='Terminal'||!terminal.hasOutputLine)process.exit(1);
 if(!independentTerminals.sideHasSide||independentTerminals.sideHasBottom||!independentTerminals.bottomHasBottom||independentTerminals.bottomHasSide)process.exit(1);
 if(!sideTask.panelVisible||sideTask.title!=='Side tasks'||sideTask.taskTitle!=='gpt-5.6-terra'||sideTask.taskBody!=='Checking redirects'||sideTask.taskStatus!=='running')process.exit(1);
-if(sideTaskNavigation.activeId!=='child-thread'||sideTaskNavigation.storedId!=='child-thread'||sideTaskNavigation.heading!=='gpt-5.6-terra'||sideTaskNavigation.response!=='Child task result')process.exit(1);
-if(failedSideTaskNavigation.activeId!=='child-thread'||failedSideTaskNavigation.storedId!=='child-thread'||failedSideTaskNavigation.heading!=='gpt-5.6-terra'||!failedSideTaskNavigation.toast.includes('Unexpected RPC thread/read')||failedSideTaskNavigation.disabled||failedSideTaskNavigation.busy!==null)process.exit(1);
+if(sideTaskNavigation.activeId!=='child-thread'||sideTaskNavigation.routeId!=='child-thread'||sideTaskNavigation.heading!=='gpt-5.6-terra'||sideTaskNavigation.response!=='Child task result')process.exit(1);
+if(failedSideTaskNavigation.activeId!=='child-thread'||failedSideTaskNavigation.routeId!=='child-thread'||failedSideTaskNavigation.heading!=='gpt-5.6-terra'||!failedSideTaskNavigation.toast.includes('Unexpected RPC thread/read')||failedSideTaskNavigation.disabled||failedSideTaskNavigation.busy!==null)process.exit(1);
 if(!restoredTerminal.panelVisible||!restoredTerminal.hasOutputLine)process.exit(1);

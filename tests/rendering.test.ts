@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { JSDOM } from "jsdom";
 import { agentMessageText, isImageReference, itemImageReferences, localDownloadUrl, localImageUrl, parseFileReference, renderAssistantMarkdown, renderItemImages } from "../public/rendering.js";
 
 describe("assistant Markdown and LaTeX rendering", () => {
@@ -135,4 +136,19 @@ describe("assistant Markdown and LaTeX rendering", () => {
     ]);
     expect(renderItemImages({ type: "imageGeneration", src: "https://example.com/generated" })).toContain('data-image-src="https://example.com/generated"');
   });
+});
+
+
+test("uses the DOM sanitizer in browsers for encoded executable links and event handlers", () => {
+  const previous = globalThis.window, dom = new JSDOM("");
+  try {
+    globalThis.window = dom.window;
+    const html = renderAssistantMarkdown('<a href="jav&#x61;script:alert(1)">bad</a><svg><g onload="alert(1)"></g></svg><img src="x" onerror="alert(1)"> [good](https://example.com)');
+    const root = dom.window.document.createElement("div"); root.innerHTML = html;
+    expect(root.querySelector("a")?.getAttribute("href")).toBeNull();
+    expect(root.querySelector("[onload], [onerror], script")).toBeNull();
+    expect(root.querySelector('a[href="https://example.com"]')?.getAttribute("rel")).toBe("noopener noreferrer");
+    expect(renderAssistantMarkdown('[file](sandbox:/tmp/report.pdf)')).toContain('data-file-download="/tmp/report.pdf"');
+    expect(renderAssistantMarkdown('$x^2$')).toContain('class="katex"');
+  } finally { globalThis.window = previous; dom.window.close(); }
 });

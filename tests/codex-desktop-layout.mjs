@@ -29,7 +29,7 @@ const result={
   sidebar:await box('#sidebar'),
   newTask:await box('#newTask'),
   search:await box('#sidebarSearchButton'),
-  productLabel:await box('#productModeButton strong'),
+  productLabel:await box('#productTitle strong'),
   projectRow:await box('.sidebar-project-row'),
   firstThread:await box('.thread-item'),
   footer:await box('.sidebar-footer-row'),

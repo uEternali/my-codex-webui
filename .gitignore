@@ -17,3 +17,6 @@ approval-e2e-*.png
 browser-smoke.png
 mobile-layout.png
 surfaces-*.png
+
+# Local agent instructions
+/AGENTS.md

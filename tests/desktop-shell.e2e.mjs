@@ -30,7 +30,7 @@ await page.evaluate(()=>{
 });
 await page.click('#accountButton');
 const chatgpt=await page.evaluate(()=>({
-  product:document.querySelector('#productModeButton strong')?.textContent.trim(),
+  product:document.querySelector('#productTitle strong')?.textContent.trim(),
   newChat:document.querySelector('#newTask span:nth-child(2)')?.textContent.trim(),
   search:document.querySelector('#threadSearch')?.placeholder,
   projects:document.querySelector('#projectButton')?.textContent.trim(),
@@ -192,7 +192,7 @@ console.log(JSON.stringify({chatgpt,settingsShell,configuration,settingsSearch,s
 await browser.close();
 if(
   errors.length||
-  chatgpt.product!=='Codex'||chatgpt.newChat!=='New chat'||chatgpt.search!=='Search chats'||chatgpt.projects!=='Projects'||chatgpt.footerName!=='Desktop User'||chatgpt.footerMeta!==''||chatgpt.buttonLabel!=='Open profile menu'||chatgpt.profileHidden||chatgpt.usageHidden||chatgpt.logoutHidden||
+  chatgpt.product!=='Codex Web UI'||chatgpt.newChat!=='New chat'||chatgpt.search!=='Search chats'||chatgpt.projects!=='Projects'||chatgpt.footerName!=='Desktop User'||chatgpt.footerMeta!==''||chatgpt.buttonLabel!=='Open profile menu'||chatgpt.profileHidden||chatgpt.usageHidden||chatgpt.logoutHidden||
   settingsShell.groups.join('|')!=='Personal|Integrations|Coding|Archived'||!settingsShell.pages.includes('Configuration')||!settingsShell.pages.includes('Cloud preferences')||!settingsShell.fullPage||settingsShell.back!=='Back to app'||settingsShell.route!=='/settings/general-settings'||settingsShell.modal||settingsShell.navSpacer!==46||configuration.title!=='Configuration'||configuration.route!=='/settings/agent'||!configuration.values.some(value=>value.startsWith('Model'))||settingsSearch.visible.join('|')!=='Browser'||settingsSearch.groups.join('|')!=='Integrations'||!settingsSearch.clearVisible||
   !settings.open||settings.title!=='Settings'||settings.page!=='General'||settings.permission!=='Ask for approval'||!settings.autoReviewHidden||!settings.autoReviewChecked||!settings.fullAccessChecked||
   !permissionMenu.open||permissionMenu.options.join('|')!=='Ask for approval|Approve for me|Full access|team-safe|managed-blocked'||!permissionMenu.blockedDisabled||
