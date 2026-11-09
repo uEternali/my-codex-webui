@@ -13,7 +13,9 @@ for(const viewport of [{width:1280,height:720},{width:360,height:700}]){
   page.on('console',message=>{if(message.type()==='error'&&!message.text().includes('404'))errors.push(message.text())});
   await page.goto(base,{waitUntil:'networkidle'});
   await page.click('#toggleSidePanel');
-  await page.click('[data-side-panel-action="browser"]');
+  // The Browser tool has no launcher entry; exercise its retained component directly.
+  await page.waitForFunction(()=>Boolean(globalThis.__codexWebuiDebug?.sideTabs));
+  await page.evaluate(()=>globalThis.__codexWebuiDebug.sideTabs.choose('browser'));
   await page.waitForFunction(()=>!document.querySelector('#browserPanel').hidden);
   const emptyExternalHidden=await page.locator('#browserOpenExternal').evaluate(node=>node.hidden&&getComputedStyle(node).display==='none');
 
@@ -34,8 +36,8 @@ for(const viewport of [{width:1280,height:720},{width:360,height:700}]){
   await page.waitForFunction(url=>document.querySelector('#browserUrl').value===url&&document.querySelector('#browserStatus')?.dataset.tone==='loaded',second);
   await page.click('#browserRefresh');
   await page.waitForFunction(()=>document.querySelector('#browserStatus')?.dataset.tone==='loaded');
-  await page.click('#newTab');
-  await page.click('#utilityTab');
+  await page.click('#openSidePanelTab');
+  await page.click('#sidePanelTabs [data-side-panel-tab=browser]');
 
   const result=await page.evaluate(()=>{
     const panel=document.querySelector('#sidePanel').getBoundingClientRect();
@@ -45,7 +47,7 @@ for(const viewport of [{width:1280,height:720},{width:360,height:700}]){
       scrollWidth:document.documentElement.scrollWidth,
       panelWidth:panel.width,
       panelVisible:!document.querySelector('#browserPanel').hidden,
-      tabSelected:document.querySelector('#utilityTab').getAttribute('aria-selected'),
+      tabSelected:document.querySelector('#sidePanelTabs [role=tab][aria-selected=true]').getAttribute('aria-selected'),
       history:[...debug.browserState.history],
       historyIndex:debug.browserState.index,
       backDisabled:document.querySelector('#browserBack').disabled,

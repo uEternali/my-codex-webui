@@ -2,7 +2,7 @@ import { codexIcon } from './codex-icons.js';
 
 // Projects are groups of native sessions with the same workspace, not folders
 // owned by the WebUI. Batch actions only use the session APIs.
-export function createProjectControls({ rpc, translate: t, projectKeyFor, projectName, getThreads, onNew, onRemove, onRefresh, onProjectEmpty, closeThreadMenu, toast }) {
+export function createProjectControls({ rpc, translate: t, confirmAction, projectKeyFor, projectName, getThreads, onNew, onRemove, onRefresh, onProjectEmpty, closeThreadMenu, toast }) {
   const menu = document.querySelector('#projectActionsMenu');
   let selected = null, anchor = null, busy = false;
 
@@ -76,7 +76,11 @@ export function createProjectControls({ rpc, translate: t, projectKeyFor, projec
       const message = action === 'archive'
         ? 'Archive “{project}” and all {count} chats? Workspace files will be kept. Restoring a chat will show its original project again.'
         : 'Delete “{project}” and all {count} chats, including archived chats and agent sub-tasks? This cannot be undone. Workspace files and independent branches in other projects will be kept.';
-      if (!confirm(t(message, { project: projectName(key), count: total }))) { toast(t('Canceled')); return; }
+      if (!await confirmAction({
+        title: t(action === 'archive' ? 'Archive project' : 'Delete project'),
+        message: t(message, { project: projectName(key), count: total }),
+        confirmLabel: t(action === 'archive' ? 'Archive' : 'Delete'),
+      })) { toast(t('Canceled')); return; }
       const depth = thread => { let result = 0, parent = parentId(thread); const seen = new Set([thread.id]); while (byId.has(parent) && !seen.has(parent)) { seen.add(parent); result++; parent = parentId(byId.get(parent)); } return result; };
       if (action === 'delete') targets.sort((a, b) => depth(b) - depth(a));
       for (const thread of targets) {

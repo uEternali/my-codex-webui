@@ -56,6 +56,7 @@ try {
     });
     const newPage = async route => {
       const target = await context.newPage(); target.setDefaultTimeout(12000); target.on('pageerror', error => errors.push(error.message));
+      target.on('dialog', dialog => { errors.push(`Unexpected browser dialog: ${dialog.message()}`); void dialog.dismiss(); });
       if (transport === 'sse') await target.routeWebSocket('**/ws', socket => socket.close());
       await target.goto(base + route); await ready(target); return target;
     };
@@ -65,10 +66,13 @@ try {
     const group = project => page.locator(`.sidebar-project-group[data-project="${project.cwd}"]`);
     const more = async project => { await group(project).locator('.sidebar-project-toolbar').hover(); await group(project).locator('.project-more').click(); await page.locator('#projectActionsMenu').waitFor(); };
     const chooseAction = async (project, action, accept = true) => {
-      await more(project); const dialog = page.waitForEvent('dialog');
+      await more(project);
       await page.locator(`[data-project-action="${action}"]`).click();
-      const confirmation = await dialog; const message = confirmation.message();
-      if (accept) await confirmation.accept(); else await confirmation.dismiss(); return message;
+      const dialog = page.locator('#confirmationDialog'); await dialog.waitFor();
+      const message = await dialog.innerText();
+      assert(await dialog.locator('[value="cancel"]').evaluate(node => document.activeElement === node), 'Project confirmation focuses Cancel');
+      await dialog.locator(`[value="${accept ? 'confirm' : 'cancel'}"]`).click();
+      await dialog.waitFor({ state: 'hidden' }); return message;
     };
 
     phase = transport + ': independent windows';
@@ -131,10 +135,19 @@ try {
     await more(alpha); await page.locator('[data-project-action="archive"]').click();
     await page.locator('#toast').getByText('Could not archive project (0/0): Could not load the complete chat list', { exact: true }).waitFor();
     assert((await protocol()).filter(call => call.method === 'thread/archive').length === archiveBefore, 'Invalid pagination fails closed before any mutation'); await configure({ repeatCursor: false });
+    // The complete sidebar now includes this formerly off-page running session.
+    await page.waitForFunction(id => globalThis.__codexWebuiDebug.state.threads.find(thread => thread.id === id)?.status.type !== 'active', `${alpha.prefix}-120`);
     const cancelMessage = await chooseAction(alpha, 'archive', false);
     assert(cancelMessage.includes('121 chats') && cancelMessage.includes('files will be kept'), 'Confirmation includes all pages and preserves workspace files');
     await page.locator('#toast').getByText('Canceled', { exact: true }).waitFor();
     assert((await protocol()).filter(call => call.method === 'thread/archive').length === archiveBefore, 'Canceling batch archive performs no mutation');
+    const deleteBefore = (await protocol()).filter(call => call.method === 'thread/delete').length;
+    await more(alpha); await page.locator('[data-project-action="delete"]').click();
+    await page.locator('#confirmationDialog').waitFor();
+    assert((await page.locator('#confirmationHint').textContent()).includes('124 chats'), 'Delete confirmation counts active and archived chats before any mutation');
+    await page.locator('#confirmationDialog [value="cancel"]').press('Escape'); await page.locator('#confirmationDialog').waitFor({ state: 'hidden' });
+    await page.locator('#toast').getByText('Canceled', { exact: true }).waitFor();
+    assert((await protocol()).filter(call => call.method === 'thread/delete').length === deleteBefore, 'Escape cancels the entire project deletion');
 
     phase = transport + ': archive, restore, delete';
     await chooseAction(alpha, 'archive');

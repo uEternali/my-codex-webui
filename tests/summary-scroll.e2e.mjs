@@ -11,7 +11,7 @@ const result=await page.evaluate(()=>{
   const toolbar=document.querySelector('.summary-panel-toolbar');
   const scroller=document.querySelector('.summary-panel-scroll');
   scroller.scrollTop=scroller.scrollHeight;
-  const source=[...document.querySelectorAll('.summary-section-title')].find(node=>node.textContent.trim()==='Sources');
+  const source=document.querySelector('#summaryPanel .summary-section:last-child');
   const panelRect=panel.getBoundingClientRect(),toolbarRect=toolbar.getBoundingClientRect(),scrollRect=scroller.getBoundingClientRect(),sourceRect=source.getBoundingClientRect();
   return {panelHeight:panelRect.height,toolbarHeight:toolbarRect.height,scrollHeight:scrollRect.height,total:toolbarRect.height+scrollRect.height,sourceBottom:sourceRect.bottom,panelBottom:panelRect.bottom};
 });

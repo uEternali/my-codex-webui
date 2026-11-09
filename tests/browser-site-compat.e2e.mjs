@@ -20,7 +20,9 @@ const errors=[];
 page.on('pageerror',error=>errors.push(error.message));
 await page.goto(base,{waitUntil:'networkidle'});
 await page.click('#toggleSidePanel');
-await page.click('[data-side-panel-action="browser"]');
+// The Browser tool has no launcher entry; exercise its retained component directly.
+await page.waitForFunction(()=>Boolean(globalThis.__codexWebuiDebug?.sideTabs));
+await page.evaluate(()=>globalThis.__codexWebuiDebug.sideTabs.choose('browser'));
 await page.fill('#browserUrl',target);
 await page.press('#browserUrl','Enter');
 const frame=page.frameLocator('#browserFrame');

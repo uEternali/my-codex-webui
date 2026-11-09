@@ -4,7 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <script>if(matchMedia('(pointer:coarse)').matches||navigator.maxTouchPoints>0)document.documentElement.classList.add('mobile-device')</script>
-<meta name="theme-color" content="#181818">
+<meta name="theme-color" content="#242424">
+<script>{let theme;try{theme=localStorage.getItem('codex-webui-theme')}catch{}theme=theme==='light'||theme==='dark'?theme:matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light';document.documentElement.dataset.theme=theme;document.querySelector('meta[name="theme-color"]').content=theme==='dark'?'#242424':'#ffffff'}</script>
 <title>Codex Web UI</title>
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/style.css">
@@ -36,10 +37,11 @@
     <div class="window-brand"><span id="windowCodexMark"></span><strong>Codex</strong></div>
     <div class="thread-heading"><span id="threadTitle">New task</span><span id="threadPath"></span></div>
     <div class="top-actions">
+      <button class="icon-button" id="toggleTheme" type="button" title="Switch to dark mode" aria-label="Switch to dark mode" aria-pressed="false" data-i18n-ignore><span class="icon-slot" data-icon="moon"></span></button>
       <button class="icon-button" id="toggleSidebar" title="Toggle sidebar" aria-controls="sidebar" aria-expanded="true" aria-pressed="true"><span class="icon-slot" data-icon="panelLeft"></span></button>
       <button class="icon-button" id="toggleBottomPanel" title="Toggle terminal panel" aria-controls="bottomPanel" aria-expanded="false" aria-pressed="false"><span class="icon-slot" data-icon="panelBottom"></span></button>
-      <button class="icon-button" id="toggleSummaryPanel" title="Toggle summary" aria-controls="summaryPanel" aria-expanded="false" aria-pressed="false"><span class="icon-slot" data-icon="info"></span></button>
       <button class="icon-button" id="toggleSidePanel" title="Toggle side panel" aria-controls="sidePanel" aria-expanded="false" aria-pressed="false"><span class="icon-slot" data-icon="panelRight"></span></button>
+      <button class="icon-button" id="toggleSummaryPanel" title="Toggle session status" aria-controls="summaryPanel" aria-expanded="false" aria-pressed="false"><span class="icon-slot" data-icon="info"></span></button>
     </div>
   </header>
 
@@ -48,7 +50,7 @@
       <div class="sidebar-mode-row">
         <div class="sidebar-product" id="productTitle"><strong>Codex Web UI</strong></div>
         <button class="sidebar-toolbar-button" id="sidebarSearchButton" type="button" title="Search" aria-label="Search chats" aria-expanded="false" aria-controls="sidebarSearchPanel"><span class="icon-slot" data-icon="search"></span></button>
-        <button class="sidebar-toolbar-button sidebar-close" id="closeSidebar" type="button" title="Close sidebar" aria-label="Close sidebar" aria-controls="sidebar"><span class="icon-slot" data-icon="panelLeft"></span></button>
+        <button class="sidebar-toolbar-button sidebar-close" id="closeSidebar" type="button" title="Close sidebar" aria-label="Close sidebar" aria-controls="sidebar"><span class="icon-slot" data-icon="chevronLeft"></span></button>
       </div>
       <div class="sidebar-search-panel" id="sidebarSearchPanel" hidden>
         <label class="sidebar-search-field"><span class="icon-slot" data-icon="search"></span><input id="threadSearch" type="search" placeholder="Search chats" aria-label="Search chats"></label>
@@ -107,6 +109,14 @@
       </div>
     </section>
     <div class="composer-dock">
+      <section class="thread-locked" id="threadLocked" aria-labelledby="threadLockedTitle" hidden>
+        <span class="icon-slot thread-locked-icon" data-icon="lockKeyhole" aria-hidden="true"></span>
+        <div class="thread-locked-copy"><strong id="threadLockedTitle">Open in another app</strong><p>Close the chat there to continue here.</p></div>
+        <div class="thread-locked-actions">
+          <button type="button" id="retryThread">Retry</button>
+          <button type="button" id="forkLockedThread">Create chat branch</button>
+        </div>
+      </section>
       <form class="composer" id="composer">
         <div class="composer-autocomplete" id="composerAutocomplete" role="listbox" aria-label="Composer suggestions" hidden></div>
         <div class="goal-picker" id="goalPicker" hidden>
@@ -159,12 +169,9 @@
   </main>
 
   <aside class="side-panel" id="sidePanel" hidden>
+    <div class="right-panel-resizer" data-right-panel-resizer role="separator" aria-orientation="vertical" aria-label="Resize side panel" tabindex="0"></div>
     <div class="side-panel-toolbar">
-      <div class="side-panel-tabs" role="tablist" aria-label="Task side panel">
-        <button class="side-panel-tab active" id="newTab" type="button" role="tab" aria-selected="true" data-side-panel-tab="launcher">New tab</button>
-        <button class="side-panel-tab" id="reviewTab" type="button" role="tab" aria-selected="false" data-side-panel-tab="review" hidden>Review <span id="changeCount">0</span></button>
-        <button class="side-panel-tab" id="utilityTab" type="button" role="tab" aria-selected="false" data-side-panel-tab="utility" hidden></button>
-      </div>
+      <div class="side-panel-tabs" id="sidePanelTabs" role="tablist" aria-label="Task side panel"></div>
       <div class="side-panel-tools">
         <button class="icon-button small" id="openSidePanelTab" type="button" title="Open side panel tab"><span class="icon-slot" data-icon="plus"></span></button>
         <button class="icon-button small" title="Close panel" id="closeSidePanel" type="button"><span class="icon-slot" data-icon="x"></span></button>
@@ -175,14 +182,15 @@
       <div class="side-panel-launcher-list">
         <button class="side-panel-launcher-action" type="button" data-side-panel-action="review"><span class="icon-slot" data-icon="fileDiff"></span><span>Review</span></button>
         <button class="side-panel-launcher-action" type="button" data-side-panel-action="terminal"><span class="icon-slot" data-icon="terminal"></span><span>Terminal</span></button>
-        <button class="side-panel-launcher-action" type="button" data-side-panel-action="browser"><span class="icon-slot" data-icon="globe"></span><span>Browser</span></button>
         <button class="side-panel-launcher-action" type="button" data-side-panel-action="files"><span class="icon-slot" data-icon="folderOpen"></span><span>Files</span></button>
-        <button class="side-panel-launcher-action" type="button" data-side-panel-action="side-task"><span class="icon-slot" data-icon="messageSquare"></span><span>Side task</span></button>
+        <button class="side-panel-launcher-action" type="button" data-side-panel-action="side-chat"><span class="icon-slot" data-icon="messageSquare"></span><span>Side chat</span></button>
+        <button class="side-panel-launcher-action" type="button" data-side-panel-action="side-task"><span class="icon-slot" data-icon="messageSquare"></span><span>Subagents</span></button>
       </div>
     </section>
     <section class="review-panel-content" id="reviewPanelContent" role="tabpanel" hidden>
       <div id="changesPanel">
         <div class="change-summary"><span id="changeSummary">No changes yet</span><span class="review-stats" id="reviewStats"></span><button class="icon-button small" title="Toggle word wrap" id="reviewWrap"><span class="icon-slot" data-icon="wrapText"></span></button><button class="icon-button small" title="Collapse all diffs" id="reviewExpand"><span class="icon-slot" data-icon="chevronsUp"></span></button><button class="icon-button small" title="Switch to split diff" id="reviewMode"><span class="icon-slot" data-icon="columns2"></span></button><button class="icon-button small" title="Undo changes" id="reviewPatch"><span class="icon-slot" data-icon="undo"></span></button></div>
+        <label class="review-turn-picker" hidden><span>Review changes</span><select id="reviewTurnSelect" aria-label="Review changes"></select></label>
         <div class="change-list" id="changeList"><div class="panel-empty">Changes made by Codex will appear here.</div></div>
       </div>
     </section>
@@ -218,48 +226,31 @@
     <section class="side-panel-terminal" id="sideTerminalPanel" role="tabpanel" hidden aria-label="Terminal">
       <div class="terminal-host side-terminal-host" id="sideTerminalHost" data-connected="false"></div>
     </section>
-    <section class="side-task-panel" id="sideTaskPanel" role="tabpanel" hidden aria-label="Side tasks">
-      <div class="side-task-list" id="sideTaskList"><div class="side-task-empty">Side tasks started by this chat will appear here.</div></div>
-    </section>
-    <section class="side-panel-utility" id="utilityPanelContent" role="tabpanel" hidden>
-      <div class="side-panel-utility-empty"><span class="icon-slot" id="utilityPanelIcon"></span><h2 id="utilityPanelTitle"></h2><p id="utilityPanelDescription"></p><button id="utilityPanelAction" type="button" hidden></button></div>
+    <section class="side-task-panel" id="sideTaskPanel" role="tabpanel" hidden aria-label="Subagents">
+      <div class="side-task-list" id="sideTaskList" data-i18n-ignore></div>
+      <section class="subagent-preview" id="subagentPreview" hidden aria-label="Subagent messages">
+        <div class="subagent-preview-toolbar">
+          <button type="button" class="icon-button small" id="backSideTasks" title="Back to subagents"><span class="icon-slot" data-icon="chevronLeft"></span></button>
+          <strong data-subagent-title data-i18n-ignore></strong>
+          <button type="button" class="icon-button small" data-subagent-open title="Open chat"><span class="icon-slot" data-icon="messageSquare"></span></button>
+        </div>
+        <code class="subagent-preview-id" data-subagent-id data-i18n-ignore></code>
+        <div class="subagent-preview-notice" data-subagent-notice hidden><span data-i18n-ignore></span><button type="button" data-subagent-retry>Retry</button></div>
+        <button type="button" class="subagent-earlier" data-subagent-earlier hidden>Load earlier messages</button>
+        <div class="subagent-approvals" data-subagent-approvals hidden data-i18n-ignore></div>
+        <div class="subagent-preview-content" data-subagent-content data-i18n-ignore></div>
+        <p class="subagent-preview-footer">Preview messages and handle approvals here.</p>
+      </section>
     </section>
   </aside>
-  <aside class="summary-panel" id="summaryPanel" hidden>
-    <div class="summary-panel-toolbar"><strong>Summary</strong><button class="icon-button small" title="Close summary" id="closeSummaryPanel" type="button"><span class="icon-slot" data-icon="x"></span></button></div>
-    <div class="summary-panel-scroll">
-      <section class="summary-section">
-        <h2 class="summary-section-title">Environment</h2>
-        <div class="summary-row"><span class="icon-slot" data-icon="folderOpen"></span><span id="summaryWorkspace">codex-webui</span></div>
-        <div class="summary-row"><span class="icon-slot" data-icon="gitBranch"></span><span id="summaryBranch">Local workspace</span></div>
-      </section>
-      <section class="summary-section">
-        <h2 class="summary-section-title">Scheduled</h2>
-        <div class="summary-empty">Scheduled task data requires the native desktop bridge.</div>
-      </section>
-      <section class="summary-section">
-        <h2 class="summary-section-title">Computer Use</h2>
-        <div class="summary-empty">Computer Use controls require the native desktop bridge.</div>
-      </section>
-      <section class="summary-section">
-        <h2 class="summary-section-title">Plan</h2>
-        <div class="summary-empty" id="summaryPlan">Plan data is not exposed by app-server.</div>
-      </section>
-      <section class="summary-section">
-        <h2 class="summary-section-title">Side tasks</h2>
-        <div class="summary-empty" id="summarySideTasks">Side task data requires the native desktop bridge.</div>
-      </section>
-      <section class="summary-section">
-        <h2 class="summary-section-title">Sources</h2>
-        <div class="summary-empty" id="summarySource">Conversation source data is not exposed by app-server.</div>
-      </section>
-    </div>
+  <aside class="summary-panel" id="summaryPanel" aria-label="Status" hidden>
+    <div class="right-panel-resizer" data-right-panel-resizer role="separator" aria-orientation="vertical" aria-label="Resize side panel" tabindex="0"></div>
+    <div class="summary-panel-toolbar"><strong>Status</strong><button class="icon-button small" title="Close session status" id="closeSummaryPanel" type="button"><span class="icon-slot" data-icon="x"></span></button></div>
+    <div class="summary-panel-scroll" data-i18n-ignore></div>
   </aside>
   <section class="bottom-panel" id="bottomPanel" aria-label="Bottom panel" hidden>
-    <div class="bottom-panel-tabs"><button class="bottom-panel-tab active" id="bottomPanelTab" type="button">New tab</button><button class="icon-button small" id="closeBottomPanel" type="button" title="Close bottom panel"><span class="icon-slot" data-icon="x"></span></button></div>
-    <div class="bottom-panel-launcher" id="bottomPanelLauncher"><button type="button" data-bottom-panel-action="terminal"><span class="icon-slot" data-icon="terminal"></span><span>Terminal</span></button><button type="button" data-bottom-panel-action="browser"><span class="icon-slot" data-icon="globe"></span><span>Browser</span></button><button type="button" data-bottom-panel-action="files"><span class="icon-slot" data-icon="folderOpen"></span><span>Files</span></button></div>
-    <div class="terminal-host" id="terminalHost" data-connected="false" hidden></div>
-    <div class="bottom-panel-utility" id="bottomPanelUtility" hidden><span class="icon-slot" id="bottomPanelIcon"></span><div><h2 id="bottomPanelUtilityTitle"></h2><p id="bottomPanelDescription"></p></div><button id="bottomPanelAction" type="button" hidden></button></div>
+    <div class="bottom-panel-tabs"><div class="bottom-terminal-tabs" id="bottomTerminalTabs" role="tablist" aria-label="Terminal tabs"></div><div class="bottom-terminal-actions"><button class="icon-button small" id="newBottomTerminal" type="button" title="New terminal"><span class="icon-slot" data-icon="plus"></span></button><button class="icon-button small" id="closeBottomPanel" type="button" title="Close bottom panel"><span class="icon-slot" data-icon="x"></span></button></div></div>
+    <div class="bottom-terminal-hosts" id="bottomTerminalHosts"></div>
   </section>
 </div>
 <dialog class="folder-dialog" id="folderDialog">
@@ -334,6 +325,13 @@
     <input id="renameThreadName" name="name" type="text" maxlength="512" autocomplete="off" aria-describedby="renameThreadError" data-i18n-ignore>
     <p class="rename-thread-error" id="renameThreadError" role="alert" hidden></p>
     <div class="rename-thread-actions"><button id="renameThreadCancel" type="button">Cancel</button><button class="rename-thread-save" id="renameThreadSave" type="submit">Save</button></div>
+  </form>
+</dialog>
+<dialog class="rename-thread-dialog confirmation-dialog" id="confirmationDialog" aria-labelledby="confirmationTitle" aria-describedby="confirmationHint">
+  <form method="dialog">
+    <div class="rename-thread-heading"><h2 id="confirmationTitle" data-confirm-title data-i18n-ignore></h2></div>
+    <p id="confirmationHint" data-confirm-message data-i18n-ignore></p>
+    <div class="rename-thread-actions"><button value="cancel">Cancel</button><button value="confirm" class="rename-thread-save" data-i18n-ignore></button></div>
   </form>
 </dialog>
 <dialog class="goal-dialog" id="goalDialog" aria-labelledby="goalDialogTitle">

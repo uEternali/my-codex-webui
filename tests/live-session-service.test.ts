@@ -130,3 +130,42 @@ test("resets incremental state when a rollout file is replaced without shrinking
     expect(store.read(path)).toMatchObject({ active: false, turn: null });
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
+
+describe("read-only token usage restoration", () => {
+  const usage = (used: number, total = used) => line("event_msg", { type: "token_count", info: {
+    last_token_usage: { input_tokens: used - 10, cached_input_tokens: 12, output_tokens: 10, reasoning_output_tokens: 2, total_tokens: used },
+    total_token_usage: { input_tokens: total - 10, output_tokens: 10, total_tokens: total }, model_context_window: 258400,
+  } });
+
+  test("restores usage without requiring an active turn and preserves it after completion", () => {
+    const state = parseRollout(usage(1000) + line("event_msg", { type: "task_started", turn_id: "t" })
+      + usage(2000, 3000) + line("event_msg", { type: "task_complete", turn_id: "t" }));
+    expect(state.active).toBe(false);
+    expect(state.tokenUsage).toEqual({
+      last: { inputTokens: 1990, cachedInputTokens: 12, outputTokens: 10, reasoningOutputTokens: 2, totalTokens: 2000 },
+      total: { inputTokens: 2990, outputTokens: 10, totalTokens: 3000 }, modelContextWindow: 258400,
+    });
+  });
+
+  test("updates incrementally, ignores missing/invalid records and accepts a real zero", () => {
+    const directory = mkdtempSync(join(tmpdir(), "codex-token-usage-")), path = join(directory, "rollout.jsonl"), store = new LiveSessionStore();
+    try {
+      writeFileSync(path, usage(1000));
+      const first = store.read(path);
+      expect(first).toMatchObject({ active: false, turn: null, tokenUsage: { last: { totalTokens: 1000 } } });
+      first.tokenUsage.last.totalTokens = 9999;
+      expect(store.read(path).tokenUsage.last.totalTokens).toBe(1000);
+      const next = usage(2000, 3000), split = next.length - 8;
+      appendFileSync(path, next.slice(0, split));
+      expect(store.read(path).tokenUsage.last.totalTokens).toBe(1000);
+      appendFileSync(path, next.slice(split));
+      expect(store.read(path).tokenUsage.last.totalTokens).toBe(2000);
+      appendFileSync(path, line("event_msg", { type: "token_count", info: null }) + line("event_msg", { type: "token_count", info: { last_token_usage: { total_tokens: -1 } } }));
+      expect(store.read(path).tokenUsage.last.totalTokens).toBe(2000);
+      appendFileSync(path, line("event_msg", { type: "token_count", info: { last_token_usage: { total_tokens: 0 }, total_token_usage: { total_tokens: 3000 } } }));
+      expect(store.read(path).tokenUsage).toMatchObject({ modelContextWindow: 258400, last: { totalTokens: 0 } });
+      writeFileSync(path, "");
+      expect(store.read(path).tokenUsage).toBeNull();
+    } finally { rmSync(directory, { recursive: true, force: true }); }
+  });
+});

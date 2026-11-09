@@ -22,7 +22,7 @@ const initial=await page.evaluate(()=>{
     topbarLeft:topbar.getBoundingClientRect().left,
     sidebarRight:sidebar.getBoundingClientRect().right,
     conversationTop:main.getBoundingClientRect().top,
-    mobileCloseHidden:getComputedStyle(document.querySelector('#closeSidebar')).display==='none',
+    sidebarCollapseVisible:getComputedStyle(document.querySelector('#closeSidebar')).display!=='none',
     hasBottomPanelButton:Boolean(document.querySelector('#toggleBottomPanel')),
     hasSummaryPanelButton:Boolean(document.querySelector('#toggleSummaryPanel')),
     hasSidePanelButton:Boolean(document.querySelector('#toggleSidePanel')),
@@ -89,16 +89,15 @@ await page.waitForFunction(()=>!document.querySelector('#bottomPanel').hidden&&d
 const bottomLauncher=await page.evaluate(()=>({
   pressed:document.querySelector('#toggleBottomPanel').getAttribute('aria-pressed'),
   title:document.querySelector('#bottomPanelTab')?.textContent?.trim(),
-  launcherHidden:document.querySelector('#bottomPanelLauncher')?.hidden,
-  utilityVisible:!document.querySelector('#bottomPanelUtility')?.hidden,
+  launcherHidden:!document.querySelector('#bottomPanelLauncher'),
+  utilityVisible:Boolean(document.querySelector('#bottomPanelUtility')),
 }));
-await page.click('[data-bottom-panel-action="terminal"]');
 await page.waitForFunction(()=>document.querySelector('#terminalHost')?.dataset.connected==='true');
 const bottom=await page.evaluate(()=>({
   pressed:document.querySelector('#toggleBottomPanel').getAttribute('aria-pressed'),
   title:document.querySelector('#bottomPanelTab')?.textContent?.trim(),
-  launcherHidden:document.querySelector('#bottomPanelLauncher')?.hidden,
-  utilityVisible:!document.querySelector('#bottomPanelUtility')?.hidden,
+  launcherHidden:!document.querySelector('#bottomPanelLauncher'),
+  utilityVisible:Boolean(document.querySelector('#bottomPanelUtility')),
   terminalVisible:!document.querySelector('#terminalHost')?.hidden,
   terminalConnected:document.querySelector('#terminalHost')?.dataset.connected,
   xterm:Boolean(document.querySelector('#terminalHost .xterm')),
@@ -107,27 +106,26 @@ await page.click('#closeBottomPanel');
 await page.waitForFunction(()=>document.querySelector('#bottomPanel').hidden);
 await page.click('#toggleBottomPanel');
 await page.click('#bottomPanelTab');
-await page.click('[data-bottom-panel-action="browser"]');
 await page.click('#closeBottomPanel');
 await page.click('#toggleBottomPanel');
 const bottomRestored=await page.evaluate(()=>({
   title:document.querySelector('#bottomPanelTab')?.textContent?.trim(),
-  launcherHidden:document.querySelector('#bottomPanelLauncher')?.hidden,
-  utilityVisible:!document.querySelector('#bottomPanelUtility')?.hidden,
+  launcherHidden:!document.querySelector('#bottomPanelLauncher'),
+  utilityVisible:Boolean(document.querySelector('#bottomPanelUtility')),
 }));
 await page.click('#closeBottomPanel');
 
 console.log(JSON.stringify({initial,summary,opened,review,bottomLauncher,bottom,bottomRestored,pageErrors},null,2));
 await browser.close();
 
-const expectedActions=['Review','Terminal','Browser','Files','Side task'];
+const expectedActions=['Review','Terminal','Browser','Files','Subagents'];
 const valid=pageErrors.length===0
   &&initial.topbarHeight===46
   &&initial.sidebarTop===0
   &&initial.sidebarHeaderTop<12
   &&initial.topbarLeft===initial.sidebarRight
   &&initial.conversationTop===46
-  &&initial.mobileCloseHidden
+  &&initial.sidebarCollapseVisible
   &&initial.hasBottomPanelButton
   &&initial.hasSummaryPanelButton
   &&initial.hasSidePanelButton
@@ -148,8 +146,8 @@ const valid=pageErrors.length===0
   &&initial.hasHardcodedTerminalPlaceholder===false
   &&summary.width>=280
   &&summary.pressed==='true'
-  &&JSON.stringify(summary.sections)===JSON.stringify(['Environment','Scheduled','Computer Use','Plan','Side tasks','Sources'])
-  &&summary.unavailable.every(text=>/native|app-server/i.test(text))
+  &&JSON.stringify(summary.sections)===JSON.stringify(['Chat details','Runtime configuration','Environment'])
+  &&summary.unavailable.every(text=>/chat|usage/i.test(text))
   &&Math.abs(summary.geometry.total-summary.geometry.panelHeight)<1
   &&summary.geometry.scrollBottom<=summary.geometry.panelBottom+.5
   &&opened.width>=320
@@ -160,22 +158,21 @@ const valid=pageErrors.length===0
   &&expectedActions.every(label=>opened.launcherActions.includes(label))
   &&opened.reviewVisible===false
   &&review.activeTab?.startsWith('Review')
-  &&review.visibleTabs.length===2
-  &&review.visibleTabs[0]==='New tab'
-  &&review.visibleTabs[1]?.startsWith('Review')
+  &&review.visibleTabs.length===1
+  &&review.visibleTabs[0]?.startsWith('Review')
   &&review.reviewVisible===true
   &&review.launcherHidden===true
-  &&bottomLauncher.title==='New tab'
-  &&bottomLauncher.launcherHidden===false
+  &&bottomLauncher.title==='Terminal 1'
+  &&bottomLauncher.launcherHidden===true
   &&bottomLauncher.utilityVisible===false
   &&bottom.pressed==='true'
-  &&bottom.title==='Terminal'
+  &&bottom.title==='Terminal 1'
   &&bottom.launcherHidden===true
   &&bottom.utilityVisible===false
   &&bottom.terminalVisible===true
   &&bottom.terminalConnected==='true'
   &&bottom.xterm
-  &&bottomRestored.title==='Browser'
+  &&bottomRestored.title==='Terminal 1'
   &&bottomRestored.launcherHidden===true
-  &&bottomRestored.utilityVisible===true;
+  &&bottomRestored.utilityVisible===false;
 if(!valid)process.exit(1);

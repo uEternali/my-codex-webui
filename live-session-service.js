@@ -70,12 +70,28 @@ function newState() {
   return {
     active: false,
     turn: null,
+    tokenUsage: null,
     itemIndex: new Map(),
     commandCalls: new Map(),
     activeCommandId: null,
     userSequence: 0,
     patchSequence: 0,
     lastEventAt: null,
+  };
+}
+
+function rolloutTokenUsage(info) {
+  if (!info || typeof info !== "object") return null;
+  const fields = { input_tokens: "inputTokens", cached_input_tokens: "cachedInputTokens", output_tokens: "outputTokens", reasoning_output_tokens: "reasoningOutputTokens", total_tokens: "totalTokens" };
+  const counters = raw => {
+    if (!raw || !Number.isFinite(raw.total_tokens) || raw.total_tokens < 0) return null;
+    return Object.fromEntries(Object.entries(fields).flatMap(([source, target]) => Number.isFinite(raw[source]) && raw[source] >= 0 ? [[target, raw[source]]] : []));
+  };
+  const last = counters(info.last_token_usage), total = counters(info.total_token_usage);
+  if (!last && !total) return null;
+  return {
+    ...(last ? { last } : {}), ...(total ? { total } : {}),
+    ...(Number.isFinite(info.model_context_window) && info.model_context_window > 0 ? { modelContextWindow: info.model_context_window } : {}),
   };
 }
 
@@ -107,6 +123,11 @@ export function applyRolloutEvent(state, event) {
   if (!event || typeof event !== "object") return state;
   if (typeof event.timestamp === "string") state.lastEventAt = event.timestamp;
   const payload = event.payload || {};
+  if (event.type === "event_msg" && payload.type === "token_count") {
+    const usage = rolloutTokenUsage(payload.info);
+    if (usage) state.tokenUsage = { ...state.tokenUsage, ...usage };
+    return state;
+  }
   if (event.type === "event_msg" && payload.type === "task_started") {
     state.active = true;
     state.itemIndex.clear();
@@ -229,6 +250,7 @@ export class LiveSessionStore {
         active: entry.state.active,
         lastEventAt: entry.state.lastEventAt,
         turn: entry.state.active && entry.state.turn ? structuredClone(entry.state.turn) : null,
+        tokenUsage: entry.state.tokenUsage ? structuredClone(entry.state.tokenUsage) : null,
       };
     } finally { closeSync(fd); }
   }

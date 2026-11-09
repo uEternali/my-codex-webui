@@ -26,6 +26,7 @@ try {
     const context = await browser.newContext({ viewport: { width: 1120, height: 850 } });
     await context.addInitScript(() => { if (window === window.top && !localStorage.getItem('codex-webui-locale')) localStorage.setItem('codex-webui-locale', 'en'); });
     const page = await context.newPage(); page.setDefaultTimeout(9000); page.on('pageerror', error => errors.push(error.message));
+    page.on('dialog', dialog => { errors.push(`Unexpected browser dialog: ${dialog.message()}`); void dialog.dismiss(); });
     if (transport === 'sse') await page.routeWebSocket('**/ws', socket => socket.close());
     await page.goto(base); await page.waitForFunction(() => globalThis.__codexWebuiDebug?.state.connected);
     const parent = `parent-${transport}`, parentName = `Actions fixture ${transport}`;
@@ -34,6 +35,11 @@ try {
     const action = async (id, selector) => { await row(id).hover(); await row(id).locator(selector).click(); };
     const more = async id => { await action(id, '.thread-more'); await page.locator('#threadActionsMenu').waitFor(); };
     const archive = async id => { await more(id); await page.getByRole('menuitem', { name: 'Archive chat', exact: true }).click(); };
+    const answerConfirmation = async accept => {
+      const dialog = page.locator('#confirmationDialog'); await dialog.waitFor();
+      await dialog.locator(`[value="${accept ? 'confirm' : 'cancel'}"]`).click();
+      await dialog.waitFor({ state: 'hidden' });
+    };
     phase = transport + ': menu'; await more(parent);
     assert(await page.locator('#threadActionsMenu [role="menuitem"] svg').count() === 3, 'Every ellipsis menu item has an icon');
     const menuGeometry = await page.locator('#threadActionsMenu').boundingBox();
@@ -109,6 +115,14 @@ try {
     await more(parent); await page.getByRole('menuitem', { name: 'Rename', exact: true }).click(); await page.locator('#renameThreadName').press('Escape');
     assert(await page.locator('#renameThreadDialog').isHidden(), 'Escape closes the rename dialog');
     assert(await page.locator('#sendButton').getAttribute('data-turn-id'), 'Closing dialog does not stop a task');
+    const deleteBeforeEscape = (await protocol()).filter(call => call.method === 'thread/delete').length;
+    await more(parent); await page.getByRole('menuitem', { name: 'Delete', exact: true }).click();
+    await page.locator('#confirmationDialog').waitFor();
+    assert(await page.locator('#confirmationDialog [value="cancel"]').evaluate(node => document.activeElement === node), 'Delete confirmation focuses Cancel');
+    await page.locator('#confirmationDialog [value="cancel"]').press('Escape');
+    await page.locator('#confirmationDialog').waitFor({ state: 'hidden' });
+    assert(await page.locator('#sendButton').getAttribute('data-turn-id'), 'Escape in delete confirmation leaves the running task untouched');
+    assert((await protocol()).filter(call => call.method === 'thread/delete').length === deleteBeforeEscape, 'Escape cancels deletion before any mutation');
     await page.reload(); await row(parent).locator('.thread-running-indicator').waitFor({ state: 'visible' });
     await row(other).click(); await page.waitForFunction(id => globalThis.__codexWebuiDebug.state.active?.id === id, other);
     assert(await row(parent).locator('.thread-running-indicator').isVisible(), 'Switching conversations preserves background running indicators');
@@ -166,13 +180,16 @@ try {
     assert(await row(branch).locator('xpath=..').getAttribute('class') === 'sidebar-project-threads expanded', 'Restore expands the original project');
     phase = transport + ': delete';
     // Retain application confirmation and show errors for permanent deletion.
-    await more(branch); page.once('dialog', dialog => dialog.dismiss()); await page.getByRole('menuitem', { name: 'Delete', exact: true }).click();
+    await more(branch); await page.getByRole('menuitem', { name: 'Delete', exact: true }).click();
+    await page.locator('#confirmationDialog').waitFor();
+    assert((await page.locator('#confirmationHint').textContent()).includes('Independent branches will be kept'), 'Page confirmation retains the deletion scope');
+    await answerConfirmation(false);
     assert(await row(branch).count() === 1, 'Cancel preserves a chat');
-    await configure({ delete: 'reject' }); await more(branch); page.once('dialog', dialog => dialog.accept()); await page.getByRole('menuitem', { name: 'Delete', exact: true }).click();
+    await configure({ delete: 'reject' }); await more(branch); await page.getByRole('menuitem', { name: 'Delete', exact: true }).click(); await answerConfirmation(true);
     await page.getByText('Could not delete thread: HTTP 503: deletion unavailable', { exact: true }).waitFor();
     await configure({ delete: 'ok' });
     await archive(branch); await page.locator(`#archivedThreadList [data-id="${branch}"]`).waitFor();
-    page.once('dialog', dialog => dialog.accept()); await action(branch, '.thread-delete'); await row(branch).waitFor({ state: 'detached' });
+    await action(branch, '.thread-delete'); await answerConfirmation(true); await row(branch).waitFor({ state: 'detached' });
     assert(!(await rpc('thread/list', { archived: true })).result.data.some(thread => thread.id === branch), 'Permanent deletion also removes archived fork registrations');
     phase = transport + ': mobile';
     // Narrow viewports keep the menu unclipped and every action reachable.
@@ -193,6 +210,10 @@ try {
       const box = await page.locator('#threadActionsMenu').boundingBox();
       assert(box.x >= 0 && box.x + box.width <= width && box.y + box.height <= 560, `Menu fits ${width}px viewport`);
       await page.getByRole('menuitem', { name: 'Rename', exact: true }).press('Escape');
+      await more(parent); await page.getByRole('menuitem', { name: 'Delete', exact: true }).click(); await page.locator('#confirmationDialog').waitFor();
+      const modal = await page.locator('#confirmationDialog').boundingBox();
+      assert(modal.x >= 0 && modal.x + modal.width <= width && modal.y >= 0 && modal.y + modal.height <= 560, `Delete confirmation fits ${width}px viewport`);
+      await answerConfirmation(false);
     }
     await rpc('turn/interrupt', { threadId: parent });
     phase = transport + ': localization';
@@ -204,6 +225,10 @@ try {
     await page.getByRole('heading', { name: '重命名聊天', exact: true }).waitFor();
     await page.screenshot({ path: artifact(`thread-management-${transport}.png`) });
     await page.locator('#renameThreadCancel').click();
+    await more(parent); await page.getByRole('menuitem', { name: '删除', exact: true }).click();
+    await page.getByRole('heading', { name: '永久删除聊天', exact: true }).waitFor();
+    assert((await page.locator('#confirmationHint').textContent()).includes('Save'), 'Localized confirmation preserves the user-defined chat name');
+    await answerConfirmation(false);
     results.push({ transport, branchName: '分支 · Save', rename: true, pinPersistence: true, archiveRestore: true, permanentDelete: true, menuIcons: 3, runningIndicator: true, backgroundLifecycle: true, runningReload: true });
     await context.close();
   }

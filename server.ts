@@ -18,10 +18,13 @@ import { createTerminalSession, normalizeTerminalResize, resolveTerminalCwd } fr
 import { readWorkspaceContext } from "./workspace-context.js";
 import { searchWorkspaceFiles } from "./file-search.js";
 import { resolveLocalFile } from "./file-service.js";
+import { listWorkspaceDirectory, previewWorkspaceFile } from "./workspace-files-service.js";
 import { resolveLocalImage } from "./image-service.js";
 import { LiveSessionStore } from "./live-session-service.js";
+import { hasActiveThreadWriter } from "./thread-writer-service.js";
 import { ForkedThreadIndex } from "./forked-thread-service.js";
 import { PinnedThreadStore } from "./pinned-thread-service.js";
+import { SideChatService } from "./side-chat-service.js";
 import {
   createPasswordSession,
   createStoredPassword,
@@ -75,6 +78,9 @@ const pending = new Map<number, { resolve: (value: any) => void; reject: (error:
 const reviewDiffs = new ReviewDiffStore();
 const serverRequests = new PendingRequestStore();
 const liveSessions = new LiveSessionStore();
+const sideChats = new SideChatService({ request });
+const sideChatSweep = setInterval(() => void sideChats.sweep(), 30_000);
+sideChatSweep.unref();
 const threadPaths = new Map<string, string>();
 let codexSessionsRoot = resolve(process.env.CODEX_HOME || resolve(homeDir, ".codex"), "sessions");
 const attachments = new AttachmentLifecycle({ directory: attachmentDirectory(), codexHome: resolve(codexSessionsRoot, '..') });
@@ -122,6 +128,7 @@ function startCodex() {
   child.stderr.on("data", (data) => console.error("[codex app-server]", String(data).trimEnd()));
   child.on("exit", (code, signal) => {
     connected = false;
+    sideChats.reset();
     accountLoader.invalidate();
     reviewDiffs.clear();
     serverRequests.clear();
@@ -205,6 +212,7 @@ function handleCodex(message: any) {
     return;
   }
   if (message.method) {
+    sideChats.notification(message.method, message.params || {});
     if (serverRequests.handleNotification(message)) broadcast(serverRequestsSnapshot());
     if (message.method === "thread/name/updated") forkedThreads.invalidate(message.params?.threadId);
     if (message.method === "thread/archived" || message.method === "thread/unarchived") {
@@ -305,7 +313,10 @@ async function dispatchBrowserMessage(message: any) {
         } catch (error) { console.warn('[attachments] Cannot verify deletion references:', error instanceof Error ? error.message : String(error)); }
       }
       let result: any;
-      if (message.method === "host/thread/live") result = await readLiveThread(params.threadId);
+      if (message.method.startsWith("host/side/")) {
+        const operation = message.method.slice("host/side/".length);
+        result = await sideChats[operation](params);
+      } else if (message.method === "host/thread/live") result = await readLiveThread(params.threadId);
       else if (message.method === "host/thread/pin") {
         if (typeof params.threadId !== "string" || !params.threadId.trim() || typeof params.pinned !== "boolean") throw new Error("Invalid pin request");
         const { thread } = await readSummary(params.threadId);
@@ -349,6 +360,9 @@ async function dispatchBrowserMessage(message: any) {
         result = { ...result, attachmentCleanup: cleanup };
         forkedThreads.forget(params.threadId);
         pinnedThreads.forget(params.threadId);
+      }
+      if (message.method === "thread/read" && result?.thread?.canAcceptDirectInput == null && hasActiveThreadWriter(resolve(codexSessionsRoot, ".."), result?.thread?.id)) {
+        result.thread = { ...result.thread, canAcceptDirectInput: false };
       }
       recordThreadPathsFromRpc(result);
       recordReviewDiffsFromRpc(message.method, params, result);
@@ -536,7 +550,7 @@ const server = createServer(async (req, res) => {
     if (appRoute || loginAssets.has(url.pathname)) {
       const file = resolvePublicAsset(appRoute ? "/" : url.pathname, publicDir);
       if (file) {
-        res.writeHead(200, { "content-type": mime[extname(file)] || "application/octet-stream", "cache-control": "no-store" });
+        res.writeHead(200, { "content-type": mime[extname(file)] || "application/octet-stream", "cache-control": url.pathname.startsWith("/assets/file-icons/") ? "public, max-age=86400" : "no-store" });
         res.end(readFileSync(file));
         return;
       }
@@ -642,6 +656,28 @@ const server = createServer(async (req, res) => {
     } catch (error) {
       res.writeHead(400, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
       res.end(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }));
+    }
+    return;
+  }
+  if (url.pathname === "/api/files/tree" || url.pathname === "/api/files/preview") {
+    if (req.method !== "GET") {
+      res.writeHead(405, { "content-type": "application/json; charset=utf-8", allow: "GET", "cache-control": "no-store" });
+      res.end(JSON.stringify({ error: "Method not allowed" }));
+      return;
+    }
+    try {
+      const cwd = url.searchParams.get("cwd") || "";
+      const path = url.searchParams.get("path") || "";
+      const options = { allowedRoots: browseRoots, revision: url.searchParams.get("revision") || undefined };
+      const data = url.pathname === "/api/files/tree"
+        ? await listWorkspaceDirectory(cwd, path, options)
+        : await previewWorkspaceFile(cwd, path, options);
+      res.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", "x-content-type-options": "nosniff" });
+      res.end(JSON.stringify(data));
+    } catch (error: any) {
+      const unavailable = ["ENOENT", "ENOTDIR", "EACCES", "EPERM", "ELOOP"].includes(error?.code);
+      res.writeHead(unavailable ? 404 : 400, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", "x-content-type-options": "nosniff" });
+      res.end(JSON.stringify({ error: unavailable ? "File or folder is unavailable" : error instanceof Error ? error.message : "Could not load project files" }));
     }
     return;
   }
@@ -822,7 +858,7 @@ const server = createServer(async (req, res) => {
   if (!file) {
     res.writeHead(404, { "content-type": "text/plain; charset=utf-8" }); res.end("Not found"); return;
   }
-  res.writeHead(200, { "content-type": mime[extname(file)] || "application/octet-stream", "cache-control": "no-store" });
+  res.writeHead(200, { "content-type": mime[extname(file)] || "application/octet-stream", "cache-control": url.pathname.startsWith("/assets/file-icons/") ? "public, max-age=86400" : "no-store" });
   res.end(readFileSync(file));
 });
 
@@ -914,6 +950,11 @@ const frontendBuild = await Bun.build({
   minify: false,
 });
 if (!frontendBuild.success) throw new Error(`Frontend build failed: ${frontendBuild.logs.join("\n")}`);
+const highlightBuild = await Bun.build({
+  entrypoints: [resolve(publicDir, "file-highlight-worker.js")],
+  outdir: publicDir, naming: "file-highlight-worker.bundle.js", target: "browser", minify: true,
+});
+if (!highlightBuild.success) throw new Error(`File highlighter build failed: ${highlightBuild.logs.join("\n")}`);
 
 startCodex();
 server.listen(port, host, () => {

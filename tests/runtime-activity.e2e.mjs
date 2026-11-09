@@ -4,6 +4,7 @@ import { launchOptions } from './browser-runtime.mjs';
 const base=process.env.CODEX_WEBUI_TEST_URL||'http://127.0.0.1:8899';
 const browser=await chromium.launch(launchOptions());
 const page=await browser.newPage({viewport:{width:1180,height:820},colorScheme:'dark'});
+await page.addInitScript(()=>{if(window===window.top)localStorage.setItem('codex-webui-locale','en')});
 const errors=[];
 page.on('pageerror',error=>errors.push(error.message));
 await page.goto(base,{waitUntil:'networkidle'});
@@ -72,7 +73,7 @@ await page.evaluate(()=>{
   api.syncTurnSnapshot({id:'synced-turn',status:'completed',itemsView:'full',items:[{id:'synced-command',type:'commandExecution',status:'completed',command:'bun run build',aggregatedOutput:'building\nbundled\n',exitCode:0}]});
 });
 await page.click('#toggleSidePanel');
-await page.click('#reviewTab');
+await page.click('[data-side-panel-action=review]');
 const recovered=await page.evaluate(()=>({
   stopped:!document.querySelector('#sendButton')?.classList.contains('stop'),
   reviewPath:document.querySelector('.review-file-name')?.textContent,

@@ -1,6 +1,7 @@
 import { codexIcon } from './codex-icons.js';
+import { threadRecency } from './sidebar-threads.js';
 
-export function createThreadControls({ rpc, translate: t, titleOf, shortPath, formatTime, getActiveId, onOpen, onUpdate, onRemove, onRestore, onRender, toast }) {
+export function createThreadControls({ rpc, translate: t, confirmAction, titleOf, shortPath, formatTime, getActiveId, onOpen, onUpdate, onRemove, onRestore, onRender, toast }) {
   const $ = selector => document.querySelector(selector);
   const menu = $('#threadActionsMenu'), dialog = $('#renameThreadDialog'), input = $('#renameThreadName');
   const archiveButton = $('#archiveThreadsButton'), archiveList = $('#archivedThreadList');
@@ -34,7 +35,7 @@ export function createThreadControls({ rpc, translate: t, titleOf, shortPath, fo
     const running = document.createElement('span'); running.className = 'thread-running-indicator'; running.hidden = archived || thread.status?.type !== 'active';
     running.setAttribute('role', 'img'); running.setAttribute('aria-label', t('Working')); running.title = t('Working'); running.innerHTML = codexIcon('loaderCircle');
     const meta = document.createElement('span'); meta.className = 'thread-meta';
-    const time = document.createElement('time'), date = new Date((thread.updatedAt || thread.recencyAt || 0) * 1000);
+    const time = document.createElement('time'), date = new Date(threadRecency(thread) * 1000);
     if (date.getTime() > 0) { time.textContent = formatTime(date); time.dateTime = date.toISOString(); time.title = date.toLocaleString(); meta.append(time); }
     const actions = document.createElement('span'); actions.className = 'thread-actions';
     if (archived) {
@@ -140,7 +141,12 @@ export function createThreadControls({ rpc, translate: t, titleOf, shortPath, fo
     }, 'Could not restore chat');
   }
   async function remove(thread) {
-    if (!thread || pending.has(thread.id) || !confirm(t('Delete “{title}”? This permanently deletes this chat and its agent sub-tasks. Independent branches will be kept.', { title: titleOf(thread) }))) return;
+    if (!thread || pending.has(thread.id)) return;
+    if (!await confirmAction({
+      title: t('Permanently delete chat'),
+      message: t('Delete “{title}”? This permanently deletes this chat and its agent sub-tasks. Independent branches will be kept.', { title: titleOf(thread) }),
+      confirmLabel: t('Delete'),
+    })) return;
     await perform(thread, async () => {
       const result = await rpc('thread/delete', { threadId: thread.id });
       archiveVersion++; archives = archives.filter(item => item.id !== thread.id); onRemove(thread.id); renderArchives();

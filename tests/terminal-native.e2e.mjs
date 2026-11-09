@@ -7,6 +7,7 @@ const chrome = process.env.PLAYWRIGHT_CHROME || [
 ].find(existsSync);
 const browser = await chromium.launch({ headless: true, ...(chrome ? { executablePath: chrome } : {}) });
 const page = await browser.newPage({ viewport: { width: 1440, height: 900 }, colorScheme: 'dark' });
+await page.addInitScript(()=>{if(window===window.top)localStorage.setItem('codex-webui-locale','en')});
 const errors = [];
 page.on('pageerror', error => errors.push(error.message));
 
@@ -21,7 +22,6 @@ const composer = await page.evaluate(() => ({
 }));
 
 await page.click('#toggleBottomPanel');
-await page.click('[data-bottom-panel-action="terminal"]');
 await page.waitForSelector('#terminalHost .xterm', { timeout: 10_000 });
 await page.locator('#terminalHost .xterm-helper-textarea').focus();
 await page.waitForFunction(()=>document.querySelector('#terminalHost')?.dataset.connected==='true');
@@ -85,6 +85,6 @@ await browser.close();
 
 if (composer.value !== '检查输入框横线与终端键盘支持') process.exit(1);
 if (composer.borderTop !== '0px none rgb(242, 242, 242)' && !composer.borderTop.startsWith('0px')) process.exit(1);
-if (!terminal.xterm || terminal.title !== 'Terminal' || terminal.connected !== 'true') process.exit(1);
+if (!terminal.xterm || terminal.title !== 'Terminal 1' || terminal.connected !== 'true') process.exit(1);
 if (!ansi.text.includes('ANSI_RED') || !ansi.text.includes('ANSI_GREEN') || ansi.red === ansi.green) process.exit(1);
 if (!terminal.rows.includes('VIM_FILE=value=9 CTRL_C_OK') || errors.length) process.exit(1);

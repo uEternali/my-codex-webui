@@ -3,6 +3,11 @@ import { createHash, createHmac, randomBytes, scryptSync, timingSafeEqual } from
 import { resolve, sep } from "node:path";
 
 const BROWSER_RPC_METHODS = new Set([
+  "host/side/start",
+  "host/side/read",
+  "host/side/send",
+  "host/side/interrupt",
+  "host/side/close",
   "model/list",
   "permissionProfile/list",
   "account/logout",
@@ -35,6 +40,8 @@ const PUBLIC_ASSETS = new Set([
   "/i18n.js",
   "/codex-brand.js",
   "/app.bundle.js",
+  "/file-highlight-worker.bundle.js",
+  ...["default_file", "default_folder", "default_folder_opened", "file_type_python", "file_type_cpp", "file_type_c", "file_type_js_official", "file_type_typescript_official", "file_type_json", "file_type_html", "file_type_css", "file_type_markdown", "file_type_yaml", "file_type_go", "file_type_rust", "file_type_java", "file_type_shell", "file_type_powershell", "file_type_docker", "file_type_git", "file_type_text", "file_type_image", "file_type_pdf", "file_type_zip", "file_type_sql", "file_type_config", "file_type_binary"].map(name => `/assets/file-icons/${name}.svg`),
   "/assets/codex-app-icon-128.png",
   "/assets/codex-app-icon.png",
   "/assets/codex-motion/local-context.json",

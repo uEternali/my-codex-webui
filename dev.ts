@@ -6,6 +6,10 @@ const commands = [
     args: ["bun", "build", "public/app.js", "--target=browser", "--outfile=public/app.bundle.js", "--watch", "--no-clear-screen"],
   },
   {
+    name: "file-highlighter",
+    args: ["bun", "build", "public/file-highlight-worker.js", "--target=browser", "--outfile=public/file-highlight-worker.bundle.js", "--minify", "--watch", "--no-clear-screen"],
+  },
+  {
     name: "server",
     args: ["bun", "--watch", "--no-clear-screen", "server.ts"],
   },
