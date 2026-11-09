@@ -6,6 +6,7 @@ const results=[];
 
 for(const width of [1101,1150,1190]){
   const page=await browser.newPage({viewport:{width,height:800},colorScheme:'dark'});
+  await page.addInitScript(()=>{if(window===window.top)localStorage.setItem('codex-webui-locale','en')});
   await page.goto(process.env.CODEX_WEBUI_TEST_URL||'http://127.0.0.1:8899',{waitUntil:'networkidle'});
   await page.waitForFunction(()=>globalThis.__codexWebuiDebug);
   await page.evaluate(()=>{
@@ -23,14 +24,14 @@ for(const width of [1101,1150,1190]){
 
 for(const width of [320,360]){
   const page=await browser.newPage({viewport:{width,height:700},isMobile:true,hasTouch:true,colorScheme:'dark'});
+  await page.addInitScript(()=>{if(window===window.top)localStorage.setItem('codex-webui-locale','en')});
   await page.goto(process.env.CODEX_WEBUI_TEST_URL||'http://127.0.0.1:8899',{waitUntil:'networkidle'});
   await page.click('#toggleBottomPanel');
-  const bottom=await page.evaluate(()=>{const panel=document.querySelector('#bottomPanel').getBoundingClientRect();return {width:innerWidth,scrollWidth:document.documentElement.scrollWidth,panel,title:document.querySelector('#bottomPanelTab').textContent.trim(),utilityVisible:!document.querySelector('#bottomPanelUtility').hidden}});
+  const bottom=await page.evaluate(()=>{const panel=document.querySelector('#bottomPanel').getBoundingClientRect();return {width:innerWidth,scrollWidth:document.documentElement.scrollWidth,panel,title:document.querySelector('#bottomPanelTab').textContent.trim(),utilityVisible:Boolean(document.querySelector('#bottomPanelUtility'))}});
   await page.click('#bottomPanelTab');
-  const launcher=await page.evaluate(()=>{const panel=document.querySelector('#bottomPanel').getBoundingClientRect(),buttons=[...document.querySelectorAll('[data-bottom-panel-action]')].map(node=>node.getBoundingClientRect().toJSON());return {title:document.querySelector('#bottomPanelTab').textContent.trim(),visible:!document.querySelector('#bottomPanelLauncher').hidden,buttonsInside:buttons.every(rect=>rect.left>=panel.left&&rect.right<=panel.right)}});
-  await page.click('[data-bottom-panel-action="terminal"]');
-  await page.waitForFunction(()=>document.querySelector('#terminalHost')?.dataset.connected==='true');
-  const terminal=await page.evaluate(()=>({title:document.querySelector('#bottomPanelTab').textContent.trim(),utilityVisible:!document.querySelector('#bottomPanelUtility').hidden,visible:!document.querySelector('#terminalHost').hidden,connected:document.querySelector('#terminalHost').dataset.connected,xterm:Boolean(document.querySelector('#terminalHost .xterm'))}));
+  const launcher=await page.evaluate(()=>{const panel=document.querySelector('#bottomPanel').getBoundingClientRect(),buttons=[...document.querySelectorAll('[data-bottom-panel-action]')].map(node=>node.getBoundingClientRect().toJSON());return {title:document.querySelector('#bottomPanelTab').textContent.trim(),visible:Boolean(document.querySelector('#bottomPanelLauncher')),buttonsInside:buttons.every(rect=>rect.left>=panel.left&&rect.right<=panel.right)}});
+    await page.waitForFunction(()=>document.querySelector('#terminalHost')?.dataset.connected==='true');
+  const terminal=await page.evaluate(()=>({title:document.querySelector('#bottomPanelTab').textContent.trim(),utilityVisible:Boolean(document.querySelector('#bottomPanelUtility')),visible:!document.querySelector('#terminalHost').hidden,connected:document.querySelector('#terminalHost').dataset.connected,xterm:Boolean(document.querySelector('#terminalHost .xterm'))}));
   const result={...bottom,launcher,terminal};
   results.push(result);
   await page.close();
@@ -38,6 +39,7 @@ for(const width of [320,360]){
 
 {
   const page=await browser.newPage({viewport:{width:1190,height:800},colorScheme:'dark'});
+  await page.addInitScript(()=>{if(window===window.top)localStorage.setItem('codex-webui-locale','en')});
   await page.goto(process.env.CODEX_WEBUI_TEST_URL||'http://127.0.0.1:8899',{waitUntil:'networkidle'});
   await page.click('#toggleSidePanel');
   await page.waitForFunction(()=>document.querySelector('.conversation-shell').inert&&document.querySelector('#sidePanel').getAttribute('aria-modal')==='true');
@@ -58,7 +60,7 @@ const sync=results.find(result=>result.breakpointSync)?.breakpointSync;
 const invalidPanel = results.some(result => {
   if (result.scrollWidth > result.width) return true;
   if ('ariaModal' in result && (result.ariaModal !== 'true' || !result.conversationInert || result.activeId !== 'closeSidePanel')) return true;
-  if ('title' in result && (result.title !== 'New tab' || result.utilityVisible || result.launcher.title !== 'New tab' || !result.launcher.visible || !result.launcher.buttonsInside || result.terminal.title !== 'Terminal' || result.terminal.utilityVisible || !result.terminal.visible || result.terminal.connected !== 'true' || !result.terminal.xterm)) return true;
+  if ('title' in result && (result.title !== 'Terminal 1' || result.utilityVisible || result.launcher.title !== 'Terminal 1' || result.launcher.visible || !result.launcher.buttonsInside || result.terminal.title !== 'Terminal 1' || result.terminal.utilityVisible || !result.terminal.visible || result.terminal.connected !== 'true' || !result.terminal.xterm)) return true;
   return false;
 });
 if(invalidPanel||!sync?.overlay.conversationInert||sync.overlay.modal!=='true'||sync.docked.conversationInert||sync.docked.modal!=='false'||!sync.overlayAgain.conversationInert||sync.overlayAgain.modal!=='true'||sync.overlayAgain.activeId!=='closeSidePanel')process.exit(1);

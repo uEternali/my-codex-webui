@@ -36,13 +36,12 @@ const terminal=await page.evaluate(()=>({
   panelVisible:!document.querySelector('#sideTerminalPanel').hidden,
   hostVisible:!document.querySelector('#sideTerminalHost').hidden,
   connected:document.querySelector('#sideTerminalHost').dataset.connected,
-  title:document.querySelector('#utilityTab').textContent.trim(),
+  title:document.querySelector('#sidePanelTabs [role=tab][aria-selected=true]').textContent.trim(),
   output:[...Array(globalThis.__codexTerminals.side.term.buffer.active.length)].map((_,index)=>globalThis.__codexTerminals.side.term.buffer.active.getLine(index)?.translateToString(true)||'').join('\n'),
   hasOutputLine:[...Array(globalThis.__codexTerminals.side.term.buffer.active.length)].some((_,index)=>globalThis.__codexTerminals.side.term.buffer.active.getLine(index)?.translateToString(true).trim()==='SIDE_TERMINAL_OK'),
 }));
 
 await page.click('#toggleBottomPanel');
-await page.click('[data-bottom-panel-action="terminal"]');
 await page.waitForFunction(()=>document.querySelector('#terminalHost')?.dataset.connected==='true'&&document.querySelector('#terminalHost .xterm'));
 await page.locator('#terminalHost .xterm-helper-textarea').focus();
 await page.keyboard.type("printf 'BOTTOM_TERMINAL_OK\\n'");
@@ -67,7 +66,7 @@ await page.click('[data-side-panel-action="side-task"]');
 await page.waitForFunction(()=>document.querySelector('#sideTaskList .side-task-card'));
 const sideTask=await page.evaluate(()=>({
   panelVisible:!document.querySelector('#sideTaskPanel').hidden,
-  title:document.querySelector('#utilityTab').textContent.trim(),
+  title:document.querySelector('#sidePanelTabs [role=tab][aria-selected=true]').textContent.trim(),
   taskTitle:document.querySelector('.side-task-card strong')?.textContent.trim(),
   taskBody:document.querySelector('.side-task-card small')?.textContent.trim(),
   taskStatus:document.querySelector('.side-task-status')?.textContent.trim(),
@@ -82,12 +81,18 @@ await page.evaluate(()=>{
       const pending=state.pending.get(request.id);
       if(!pending)return;
       state.pending.delete(request.id);
-      if(request.method==='thread/read'&&request.params.threadId==='child-thread')pending.resolve({thread:{id:'child-thread',cwd,source:'local',turns:[{id:'child-turn',items:[{id:'child-agent',type:'agentMessage',phase:'final_answer',text:'Child task result'}]}]}});
+      if(request.method==='thread/turns/list'&&request.params.threadId==='child-thread')pending.resolve({data:[{id:'child-turn',items:[{id:'child-agent',type:'agentMessage',phase:'final_answer',text:'Child task result'}]}]});
+      else if(request.method==='host/thread/live')pending.resolve({active:false});
+      else if(request.method==='thread/read'&&request.params.threadId==='child-thread')pending.resolve({thread:{id:'child-thread',cwd,source:'local',turns:[{id:'child-turn',items:[{id:'child-agent',type:'agentMessage',phase:'final_answer',text:'Child task result'}]}]}});
       else pending.reject(new Error(`Unexpected RPC ${request.method}`));
     });
   }};
 });
+const previousMainId=await page.evaluate(()=>globalThis.__codexWebuiDebug.state.active?.id);
 await page.click('.side-task-card');
+await page.locator('[data-subagent-content]').getByText('Child task result',{exact:true}).waitFor();
+if(await page.evaluate(()=>globalThis.__codexWebuiDebug.state.active?.id)!==previousMainId)throw new Error('A child preview must not replace the main chat');
+await page.locator('[data-subagent-open]').click();
 await page.waitForFunction(()=>globalThis.__codexWebuiDebug.state.active?.id==='child-thread'&&document.querySelector('.assistant-response .message-text')?.textContent.includes('Child task result'));
 const sideTaskNavigation=await page.evaluate(()=>({
   activeId:globalThis.__codexWebuiDebug.state.active?.id,
@@ -98,21 +103,20 @@ const sideTaskNavigation=await page.evaluate(()=>({
 await page.screenshot({path:join(tmpdir(),'codex-webui-side-task-open.png'),fullPage:false});
 
 await page.evaluate(()=>globalThis.__codexWebuiDebug.notify('item/started',{turnId:'missing-side-task-turn',item:{id:'missing-side-task',type:'collabAgentToolCall',tool:'spawnAgent',status:'inProgress',receiverThreadIds:['missing-child-thread'],prompt:'Unavailable child task',model:'gpt-5.6-terra',agentsStates:{'missing-child-thread':{status:'running'}}}}));
-await page.click('#openSidePanelTab');
-await page.click('[data-side-panel-action="side-task"]');
+await page.click('#toggleSidePanel');
+await page.click('#sidePanelTabs [data-side-panel-tab="side-task"]');
 await page.click('.side-task-card[data-thread-id="missing-child-thread"]');
-await page.waitForFunction(()=>document.querySelector('#toast')?.classList.contains('show'));
+await page.waitForFunction(()=>!document.querySelector('[data-subagent-notice]').hidden);
 const failedSideTaskNavigation=await page.evaluate(()=>({
   activeId:globalThis.__codexWebuiDebug.state.active?.id,
   routeId:new URLSearchParams(location.search).get('thread'),
   heading:document.querySelector('#threadTitle')?.textContent.trim(),
-  toast:document.querySelector('#toast')?.textContent.trim(),
+  toast:document.querySelector('[data-subagent-notice]')?.textContent.trim(),
   disabled:document.querySelector('.side-task-card[data-thread-id="missing-child-thread"]')?.disabled,
   busy:document.querySelector('.side-task-card[data-thread-id="missing-child-thread"]')?.getAttribute('aria-busy'),
 }));
 
-await page.click('#openSidePanelTab');
-await page.click('[data-side-panel-action="terminal"]');
+await page.click('#sidePanelTabs [data-side-panel-tab=terminal]');
 const restoredTerminal=await page.evaluate(()=>({
   panelVisible:!document.querySelector('#sideTerminalPanel').hidden,
   output:[...Array(globalThis.__codexTerminals.side.term.buffer.active.length)].map((_,index)=>globalThis.__codexTerminals.side.term.buffer.active.getLine(index)?.translateToString(true)||'').join('\n'),
@@ -123,7 +127,7 @@ console.log(JSON.stringify({terminal,independentTerminals,sideTask,sideTaskNavig
 await browser.close();
 if(errors.length||!terminal.panelVisible||!terminal.hostVisible||terminal.connected!=='true'||terminal.title!=='Terminal'||!terminal.hasOutputLine)process.exit(1);
 if(!independentTerminals.sideHasSide||independentTerminals.sideHasBottom||!independentTerminals.bottomHasBottom||independentTerminals.bottomHasSide)process.exit(1);
-if(!sideTask.panelVisible||sideTask.title!=='Side tasks'||sideTask.taskTitle!=='gpt-5.6-terra'||sideTask.taskBody!=='Checking redirects'||sideTask.taskStatus!=='running')process.exit(1);
+if(!sideTask.panelVisible||sideTask.title!=='Subagents'||sideTask.taskTitle!=='gpt-5.6-terra'||sideTask.taskBody!=='Checking redirects'||sideTask.taskStatus!=='Working')process.exit(1);
 if(sideTaskNavigation.activeId!=='child-thread'||sideTaskNavigation.routeId!=='child-thread'||sideTaskNavigation.heading!=='gpt-5.6-terra'||sideTaskNavigation.response!=='Child task result')process.exit(1);
 if(failedSideTaskNavigation.activeId!=='child-thread'||failedSideTaskNavigation.routeId!=='child-thread'||failedSideTaskNavigation.heading!=='gpt-5.6-terra'||!failedSideTaskNavigation.toast.includes('Unexpected RPC thread/read')||failedSideTaskNavigation.disabled||failedSideTaskNavigation.busy!==null)process.exit(1);
 if(!restoredTerminal.panelVisible||!restoredTerminal.hasOutputLine)process.exit(1);

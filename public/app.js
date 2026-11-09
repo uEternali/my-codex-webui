@@ -5,9 +5,14 @@ import { agentMessageText, renderAssistantMarkdown, renderItemImages } from './r
 import { codexIcon, hydrateCodexIcons } from './codex-icons.js';
 import { codexInterfaceMark } from './codex-brand.js';
 import { createDomI18n, createI18n } from './i18n.js';
-import { buildApprovalModel, createReviewPreferences, parseUnifiedDiff, permissionRows, splitDiffHunk, summarizeActivity, unifiedDiffFromFileChanges } from './codex-surfaces.js';
-import { browserSandboxFor, normalizeBrowserUrl } from './browser-panel.js';
-import { THREAD_NOT_FOUND, bridgeErrorCode, createBridgeError, threadInputErrorMessage } from './bridge-errors.js';
+import { buildApprovalModel, createReviewPreferences, parseUnifiedDiff, permissionRows, summarizeActivity, unifiedDiffFromFileChanges } from './codex-surfaces.js';
+import { createBrowserView } from './browser-view.js';
+import { createFileBrowser } from './file-browser.js';
+import { createReviewRenderer } from './review-view.js';
+import { createSidePanelTabs } from './side-panel-tabs.js';
+import { createSideChat, parseSideCommand } from './side-chat.js';
+import { createPanelResize } from './panel-resize.js';
+import { THREAD_ACTIVE_WRITER, THREAD_NOT_FOUND, bridgeErrorCode, createBridgeError, threadInputErrorMessage } from './bridge-errors.js';
 import { isApprovalRequest, PendingRequestStore } from './approval-state.js';
 import { createGoalController } from './goals.js';
 import { parseGoalCommand } from './goal-state.js';
@@ -17,6 +22,14 @@ import { createClientMessageId, SteeringStore } from './steering-state.js';
 import { copyReplyText, replyText } from './reply-actions.js';
 import { createThreadControls } from './thread-controls.js';
 import { createProjectControls } from './project-controls.js';
+import { createConfirmDialog } from './confirm-dialog.js';
+import { createThemeController } from './theme.js';
+import { createPromptHistory } from './prompt-history.js';
+import { contextUsageValue, renderSessionStatus } from './session-status.js';
+import { createSessionTree, parentThreadId, subagentThreads } from './session-tree.js';
+import { createSubagentPreview } from './subagent-preview.js';
+import { createTerminalTabs } from './terminal-tabs.js';
+import { SIDEBAR_PAGE_SIZE, loadSidebarThreads, threadRecency } from './sidebar-threads.js';
 import lottie from 'lottie-web/build/player/lottie_light.js';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
@@ -26,23 +39,39 @@ const i18n=globalThis.__codexWebuiI18n||createI18n();
 globalThis.__codexWebuiI18n=i18n;
 globalThis.__codexWebuiDomI18n=globalThis.__codexWebuiDomI18n||createDomI18n(i18n);
 const t=(message,values)=>i18n.t(message,values);
+const confirmAction=createConfirmDialog($('#confirmationDialog'));
 const state = { ws:null, events:null, transport:'connecting', wsFallbackTimer:null, rpcId:1, pending:new Map(), threads:[], active:null, models:[], selectedModel:'', workspaceContext:null, workspaceSelected:false, threadLoading:false, projectless:false, composerMode:'local', planMode:false, permissionMode:localStorage.getItem('codex-webui-permission-mode')||'default', permissionProfiles:[], permissionVisibility:{autoReview:true,fullAccess:localStorage.getItem('codex-webui-permission-full-access')!=='false'}, goalMode:false, backgroundAgentsVisible:false, cloudStartingState:null, placeholderText:null, composerMentions:[], turnWindow:null, tokenUsage:new Map(), items:new Map(), turns:new Map(), activities:new Map(), activityItems:new Map(), sideTasks:new Map(), dividers:new Map(), changes:new Map(), requestCards:new Map(), serverRequests:new PendingRequestStore(), motion:new Map(), turnDiffs:new Map(), activeReview:null, account:null, connected:false, initializing:true, config:{home:'',defaultCwd:'',projectless:false} };
-const approvalContexts=new WeakMap();
+const approvalContexts=new WeakMap(),approvalAnswers=new Set();
 let steeringStorage;try{steeringStorage=sessionStorage}catch{}
 const pendingSteers=new SteeringStore(steeringStorage),steeringSubmissions=new Map(),steeringInterrupts=new Map();
 const compactionRequests=new Map(),forkRequests=new Set(),promptAdmissions=new Set();
+const blockedThreads=new Set(),threadResumeRequests=new Map(),blockedThreadActions=new Set();
+const sidebarProjectLimits=new Map();
+const promptHistory=createPromptHistory({storage:localStorage,getEntries:()=>state.active?.turns?.flatMap(turn=>(turn.items||[]).filter(item=>item.type==='userMessage').map(item=>userMessageContent(item).text))||[]});
 let composerAttachments, goalControls, threadControls, projectControls;
 let folderBrowse={path:'~',parent:null,selected:null};
 const reviewPreferences=createReviewPreferences(JSON.parse(localStorage.getItem('codex-webui-review-preferences')||'{}'));
-let reviewPatchState='undo';
-let sidePanelReturnFocus=null,summaryPanelReturnFocus=null,imageViewerReturnFocus=null;
-let bottomPanelLastView=null;
+let reviewPatchState='undo',reviewPinnedTurn=null;
+const reviewPatchStates=new Map(),reviewPatchRequests=new Set();
+const reviewRenderer=createReviewRenderer({document,window,t,formatPath:path=>{const cwd=state.active?.cwd;return cwd&&path.startsWith(cwd+'/')?path.slice(cwd.length+1):shortPath(path)}});
+let sidePanelReturnFocus=null,summaryPanelReturnFocus=null,imageViewerReturnFocus=null,summaryPanelMarkup='';
+let statusChatsExpanded=false,statusChatsKey=null,sideTaskListMarkup='';
+const sessionTree=createSessionTree({rpc,onChange(){syncSummaryPanel();renderSideTasks();renderPendingApprovals()}});
+const subagentPreview=createSubagentPreview({rpc,root:$('#subagentPreview'),getOwnerId:()=>state.active?.id,isVisible:()=>sideTasksVisible(),t,onOpenChat:async thread=>{if(await openThread(thread.id,thread)){subagentPreview.close();setSidePanelOpen(false)}}});
 let sidebarLayoutMobile=null;
 let pendingFullAccessAction='select';
 let settingsMobileLayout=matchMedia('(max-width:480px)').matches;
-const createTerminalState=(hostId,panelId)=>({hostId,panelId,term:null,fit:null,ws:null,resizeObserver:null,reconnectTimer:null});
-const terminalStates={bottom:createTerminalState('terminalHost','bottomPanel'),side:createTerminalState('sideTerminalHost','sidePanel')};
-const browserState={history:[],index:-1,loadTimer:null,loadRequest:0};
+const createTerminalState=(hostId,panelId)=>({hostId,panelId,term:null,fit:null,ws:null,resizeObserver:null,reconnectTimer:null,closed:false,cwd:null,exited:false});
+const terminalStates={bottom:null,side:null};
+const bottomTerminals=createTerminalTabs({tabList:$('#bottomTerminalTabs'),hosts:$('#bottomTerminalHosts'),getCwd:currentTerminalCwd,createState:createTerminalState,initialize:terminal=>{initializeTerminal(terminal);requestAnimationFrame(()=>{fitTerminal(terminal);if(terminalIsVisible(terminal))terminal.term?.focus()})},dispose:disposeTerminal,onActive:terminal=>{terminalStates.bottom=terminal;globalThis.__codexTerminal=terminal?{term:terminal.term,fit:terminal.fit,state:terminal}:null},onEmpty:()=>setBottomPanelOpen(false),t});
+globalThis.__codexBottomTerminals=bottomTerminals;
+const browserTemplate=$('#browserPanel').cloneNode(true);$('#browserPanel').remove();
+const sideTerminalTemplate=$('#sideTerminalHost').cloneNode();$('#sideTerminalHost').remove();
+let sideBrowserSequence=0,sideTerminalSequence=0;
+const sideTabs=createSidePanelTabs({list:$('#sidePanelTabs'),t,onSelect:showSidePanelEntry,beforeRemove:confirmSideChatClose,onRemove(entry){if(entry.terminal){disposeTerminal(entry.terminal);entry.host.remove();if(terminalStates.side===entry.terminal)terminalStates.side=null}entry.browser?.dispose();entry.files?.dispose();entry.sideChat?.dispose();syncSidePanelLauncher();renderPendingApprovals();if(entry.kind==='side-task'&&!sideTabs.values().some(tab=>tab.kind==='side-task'))subagentPreview.close()},onEmpty:()=>setSidePanelOpen(false)});
+const panelResize=createPanelResize({handles:document.querySelectorAll('[data-right-panel-resizer]'),root:document.documentElement,getSidebarWidth:()=>document.body.classList.contains('sidebar-hidden')?0:$('#sidebar').getBoundingClientRect().width,window,storage:localStorage});
+const navigateBrowser=(...args)=>sideTabs.active?.browser?.navigate(...args);
+
 const accountRequestGate=createLatestRequestGate();
 const workspaceContextRequestGate=createLatestRequestGate();
 const permissionProfileRequestGate=createLatestRequestGate();
@@ -122,12 +151,12 @@ function handle(message){
 }
 function setStatus(kind,text){
   $('#statusDot').className='status-dot'+(kind==='connected'?' connected':kind==='error'?' error':'');
-  $('#statusText').textContent=t(text||kind);
+  $('#statusText').textContent=t(text||kind);syncSummaryPanel();
 }
 async function loadInitial(refreshAccount=false){
   const generation=++initialLoadGeneration;
   if(state.initializing)globalThis.__codexWebuiStartup?.begin();
-  try{const [models,threads,profiles]=await Promise.all([rpc('model/list',{limit:50}),rpc('thread/list',{limit:50,sortKey:'recency_at',sortDirection:'desc'}),rpc('permissionProfile/list',{cwd:permissionProfileCwd(),limit:100}).catch(()=>({data:[]})),loadAccount(refreshAccount)]);
+  try{const [models,threads,profiles]=await Promise.all([rpc('model/list',{limit:50}),loadSidebarThreads(rpc),rpc('permissionProfile/list',{cwd:permissionProfileCwd(),limit:100}).catch(()=>({data:[]})),loadAccount(refreshAccount)]);
     if(!state.connected||generation!==initialLoadGeneration)return;
     state.models=filterAppModels(models.data||[]);renderModels();applyThreadSummaries(threads.data||[]);setPermissionProfiles(profiles.data||[]);scheduleThreadListRefresh();const requestedThread=threadRouteId();if(requestedThread&&state.active?.id!==requestedThread)await openThread(requestedThread,null,{updateRoute:false});
     if(state.connected&&generation===initialLoadGeneration&&state.initializing){state.initializing=false;if($('#emptyState'))showEmpty();globalThis.__codexWebuiStartup?.finish();const initialSettingsPage=settingsRoutePage();if(initialSettingsPage)showSettings(initialSettingsPage,{updateRoute:false})}
@@ -181,19 +210,18 @@ function renderModels(){
   updateEfforts(selection.effort);syncModelLabel();renderModelMenuMain();
 }
 function chooseModel(model,keepOpen=false){const previous=$('#effortSelect').value;state.selectedModel=model;localStorage.setItem('codex-webui-model',model);updateEfforts(previous);syncModelLabel();if(keepOpen)renderModelMenuMain();else closeModelMenu();toast(`Model: ${modelDisplay(selectedModel())}`)}
-function syncModelLabel(){const model=selectedModel();$('#modelLabel').textContent=modelDisplay(model,true);$('#effortLabel').textContent=reasoningLabel($('#effortSelect').value)}
+function syncModelLabel(){const model=selectedModel();$('#modelLabel').textContent=modelDisplay(model,true);$('#effortLabel').textContent=reasoningLabel($('#effortSelect').value);syncSummaryPanel()}
 function updateEfforts(preferred){
   const model=selectedModel(),effort=$('#effortSelect');effort.innerHTML='';
   const supported=model?.supportedReasoningEfforts||[{reasoningEffort:'medium'}],values=supported.map(item=>item.reasoningEffort).filter(Boolean),saved=localStorage.getItem(`codex-webui-effort:${state.selectedModel}`),selected=[saved,preferred,model?.defaultReasoningEffort,values[0],'medium'].find(value=>values.includes(value))||'medium';
   for(const value of values.length?values:['medium']){const option=document.createElement('option');option.value=value;option.textContent=value;option.selected=value===selected;effort.append(option)}
   $('#effortLabel').textContent=reasoningLabel(effort.value);
 }
-function contextUsageValue(tokenUsage){const contextWindow=Number(tokenUsage?.modelContextWindow),totalTokens=Number(tokenUsage?.last?.totalTokens);if(!Number.isFinite(contextWindow)||contextWindow<=0||!Number.isFinite(totalTokens)||totalTokens<0)return null;const usedTokens=Math.min(totalTokens,contextWindow),percent=usedTokens/contextWindow*100;return Number.isFinite(percent)?{percent,usedTokens,contextWindow,remainingTokens:Math.max(contextWindow-usedTokens,0)}:null}
-function renderContextUsage(){const indicator=$('#contextUsage'),usage=state.active?.id?contextUsageValue(state.tokenUsage.get(state.active.id)):null;if(!indicator)return;if(!usage){indicator.hidden=true;indicator.removeAttribute('data-tooltip');return}const percent=Math.max(0,Math.min(usage.percent,100)),rounded=Math.round(percent),remaining=Math.max(0,100-rounded),usedThousands=Math.round(usage.usedTokens/1000),windowThousands=Math.round(usage.contextWindow/1000),status=rounded>=50?`${rounded}% full`:`${rounded}% used (${remaining}% left)`;indicator.hidden=false;indicator.style.setProperty('--context-percent',String(percent));indicator.setAttribute('aria-label',`Context usage: ${rounded}%`);indicator.dataset.tooltip=`Context window:\n${status}\n${usedThousands}k / ${windowThousands}k tokens used`}
+function renderContextUsage(){syncSummaryPanel();const indicator=$('#contextUsage'),usage=state.active?.id?contextUsageValue(state.tokenUsage.get(state.active.id)):null;if(!indicator)return;if(!usage){indicator.hidden=true;indicator.removeAttribute('data-tooltip');return}const percent=Math.max(0,Math.min(usage.percent,100)),rounded=Math.round(percent),remaining=Math.max(0,100-rounded),usedThousands=Math.round(usage.usedTokens/1000),windowThousands=Math.round(usage.contextWindow/1000),status=rounded>=50?`${rounded}% full`:`${rounded}% used (${remaining}% left)`;indicator.hidden=false;indicator.style.setProperty('--context-percent',String(percent));indicator.setAttribute('aria-label',`Context usage: ${rounded}%`);indicator.dataset.tooltip=`Context window:\n${status}\n${usedThousands}k / ${windowThousands}k tokens used`}
 function menuTitle(text,back=false){return `<div class="model-menu-title-row">${back?`<button type="button" class="model-menu-back" id="modelMenuBack" aria-label="Back">${codexIcon('chevronLeft')}</button>`:''}<div class="model-menu-title">${escapeHtml(text)}</div></div>`}
 function renderModelMenuMain(){const menu=$('#modelMenu'),model=selectedModel(),effort=$('#effortSelect');menu.innerHTML=`<div class="model-menu-view model-menu-view-main">${menuTitle('Reasoning')}<div class="model-menu-list" data-model-menu-efforts></div><div class="model-menu-separator"></div><button type="button" class="model-submenu-button" id="modelSubmenuButton"><span>Model</span><span class="model-submenu-value">${escapeHtml(modelDisplay(model))}</span>${codexIcon('chevronRight')}</button></div>`;const list=menu.querySelector('[data-model-menu-efforts]');for(const option of effort.options){const button=document.createElement('button');button.type='button';button.className='model-effort-row';button.dataset.value=option.value;button.setAttribute('aria-checked',String(option.selected));button.innerHTML=`<span data-i18n-ignore>${escapeHtml(reasoningLabel(option.value))}</span><span class="model-check">${option.selected?codexIcon('check'):''}</span>`;button.onclick=()=>chooseEffort(option.value);list.append(button)}menu.querySelector('#modelSubmenuButton').onclick=renderModelSubmenu}
 function renderModelSubmenu(){const menu=$('#modelMenu');menu.innerHTML=`<div class="model-menu-view model-menu-view-models">${menuTitle('Model',true)}<div class="model-menu-list model-list"></div></div>`;menu.querySelector('#modelMenuBack').onclick=renderModelMenuMain;const list=menu.querySelector('.model-list');for(const model of state.models){const button=document.createElement('button');button.type='button';button.className='model-option';button.role='menuitemradio';button.dataset.model=model.model;button.setAttribute('aria-checked',String(model.model===state.selectedModel));button.innerHTML=`<span class="model-option-copy"><strong>${escapeHtml(modelDisplay(model))}</strong>${model.description?`<small>${escapeHtml(model.description)}</small>`:''}</span><span class="model-check">${model.model===state.selectedModel?codexIcon('check'):''}</span>`;button.onclick=()=>chooseModel(model.model);list.append(button)}}
-function chooseEffort(value){const effort=$('#effortSelect');if(![...effort.options].some(option=>option.value===value))return;effort.value=value;$('#effortLabel').textContent=reasoningLabel(value);localStorage.setItem(`codex-webui-effort:${state.selectedModel}`,value);closeModelMenu();toast(`Reasoning: ${reasoningLabel(value)}`)}
+function chooseEffort(value){const effort=$('#effortSelect');if(![...effort.options].some(option=>option.value===value))return;effort.value=value;$('#effortLabel').textContent=reasoningLabel(value);localStorage.setItem(`codex-webui-effort:${state.selectedModel}`,value);syncSummaryPanel();closeModelMenu();toast(`Reasoning: ${reasoningLabel(value)}`)}
 function openModelMenu(view='main'){if(view==='models')renderModelSubmenu();else renderModelMenuMain();$('#modelMenu').hidden=false;$('#modelButton').setAttribute('aria-expanded','true')}
 function toggleModelMenu(){const menu=$('#modelMenu');if(menu.hidden)openModelMenu();else closeModelMenu()}
 function closeModelMenu(){const menu=$('#modelMenu');menu.hidden=true;$('#modelButton').setAttribute('aria-expanded','false')}
@@ -224,7 +252,7 @@ function syncTaskNotifySettings(){const toggle=$('#settingsTaskNotifyToggle'),su
 async function setTaskNotifyEnabled(enabled){if(!taskNotificationsSupported()){syncTaskNotifySettings();return}const on=Boolean(enabled);localStorage.setItem(TASK_NOTIFY_STORAGE_KEY,String(on));if(on&&Notification.permission==='default'){try{await Notification.requestPermission()}catch{}}syncTaskNotifySettings();if(on&&Notification.permission==='denied')toast(t('Browser notifications are blocked'))}
 function maybeNotifyTaskCompleted(p){if(!taskNotificationsSupported()||!taskNotifyEnabled()||Notification.permission!=='granted')return;if(document.hasFocus()&&!document.hidden)return;const thread=state.threads.find(x=>x.id===p.threadId),title=thread?.name||t('Task completed');try{new Notification(t('Task completed'),{body:title,tag:`codex-turn-${p.turn?.id||Date.now()}`})}catch{}}
 async function requestTaskNotifyPermission(){if(taskNotificationsSupported()&&taskNotifyEnabled()&&Notification.permission==='default'){try{await Notification.requestPermission()}catch{}}}
-function syncPermissionControl(){normalizePermissionMode();const selected=selectedPermission();$('#modeButton .control-label').textContent=t(state.planMode?'Plan mode':selected.label);$('#modeButton').classList.toggle('active',state.planMode||state.permissionMode!=='default');if($('#settingsPermissionValue'))$('#settingsPermissionValue').textContent=t(selected.label);syncPermissionSettings();renderPermissionMenu()}
+function syncPermissionControl(){normalizePermissionMode();const selected=selectedPermission();$('#modeButton .control-label').textContent=t(state.planMode?'Plan mode':selected.label);$('#modeButton').classList.toggle('active',state.planMode||state.permissionMode!=='default');if($('#settingsPermissionValue'))$('#settingsPermissionValue').textContent=t(selected.label);syncPermissionSettings();renderPermissionMenu();syncSummaryPanel()}
 function setPermissionMode(mode){if(!permissionModeAvailable(mode))return;const selected=permissionModeDefinition(mode);state.permissionMode=mode;localStorage.setItem('codex-webui-permission-mode',mode);syncPermissionControl();closePermissionMenu();toast(selected.label)}
 function setPermissionVisibility(kind,enabled){state.permissionVisibility[kind]=Boolean(enabled);localStorage.setItem(kind==='autoReview'?'codex-webui-permission-auto-review':'codex-webui-permission-full-access',String(Boolean(enabled)));normalizePermissionMode();syncPermissionControl()}
 function openPermissionMenu(){closeModelMenu();syncPermissionControl();$('#permissionMenu').hidden=false;$('#modeButton').setAttribute('aria-expanded','true')}
@@ -233,12 +261,12 @@ function togglePermissionMenu(){if($('#permissionMenu').hidden)openPermissionMen
 function choosePermissionMode(mode){closePermissionMenu();if(mode==='full-access'&&state.permissionMode!=='full-access'){pendingFullAccessAction='select';const dialog=$('#fullAccessDialog');if(!dialog.open)dialog.showModal();return}setPermissionMode(mode)}
 async function loadFolders(path=folderBrowse.path){const list=$('#folderList');list.innerHTML='<div class="list-state">Loading folders…</div>';try{const response=await fetch(`/api/folders?path=${encodeURIComponent(path)}`),data=await response.json();if(!response.ok)throw new Error(data.error||'Cannot browse folder');folderBrowse={path:data.path,parent:data.parent,selected:data.path};$('#folderPathInput').value=data.path;$('#folderSelection').textContent=data.path;$('#folderConfirm').disabled=false;$('#folderUp').disabled=!data.parent;list.innerHTML='';for(const folder of data.folders){const b=document.createElement('button');b.type='button';b.className='folder-item';b.innerHTML=`${icons.file}<span>${escapeHtml(folder.name)}</span>`;b.ondblclick=()=>loadFolders(folder.path);b.onclick=()=>{folderBrowse.selected=folder.path;$('#folderSelection').textContent=folder.path;$('#folderConfirm').disabled=false;list.querySelectorAll('.folder-item').forEach(x=>x.classList.remove('selected'));b.classList.add('selected')};list.append(b)}if(!data.folders.length)list.innerHTML='<div class="list-state">No subfolders</div>'}catch(e){list.innerHTML=`<div class="list-state">${escapeHtml(e.message)}</div>`}}
 function openFolderPicker(){const dialog=$('#folderDialog');folderBrowse.selected=null;if(!dialog.open)dialog.showModal();loadFolders(currentComposerCwd()||state.config.defaultCwd||state.config.home);$('#projectlessOption').classList.toggle('selected',state.workspaceSelected&&state.projectless)}
-async function syncWorkspaceContext(path){const requestId=workspaceContextRequestGate.next();try{const response=await fetch(`/api/workspace/context?cwd=${encodeURIComponent(path)}`,{cache:'no-store'}),context=await response.json();if(!response.ok)throw new Error(context.error||'Workspace context unavailable');if(!workspaceContextRequestGate.isCurrent(requestId)||state.projectless||!state.workspaceSelected)return;state.workspaceContext=context;if(!state.active&&$('#emptyState'))showEmpty()}catch{if(workspaceContextRequestGate.isCurrent(requestId)&&!state.projectless&&state.workspaceSelected){state.workspaceContext={cwd:path,project:path.split('/').filter(Boolean).at(-1)||path,environment:'Local',branch:'No branch'};if(!state.active&&$('#emptyState'))showEmpty()}}}
-function syncProjectControl(){const button=$('#composerProjectButton'),label=$('#composerProjectLabel');button.hidden=Boolean(state.active);label.textContent=t(!state.workspaceSelected?'Choose project':state.projectless?'Tasks':($('#projectName').textContent||'Project'))}
+async function syncWorkspaceContext(path){const requestId=workspaceContextRequestGate.next();try{const response=await fetch(`/api/workspace/context?cwd=${encodeURIComponent(path)}`,{cache:'no-store'}),context=await response.json();if(!response.ok)throw new Error(context.error||'Workspace context unavailable');if(!workspaceContextRequestGate.isCurrent(requestId)||state.projectless||!state.workspaceSelected)return;state.workspaceContext=context;syncSummaryPanel();if(!state.active&&$('#emptyState'))showEmpty()}catch{if(workspaceContextRequestGate.isCurrent(requestId)&&!state.projectless&&state.workspaceSelected){state.workspaceContext={cwd:path,project:path.split('/').filter(Boolean).at(-1)||path,environment:'Local',branch:'No branch'};syncSummaryPanel();if(!state.active&&$('#emptyState'))showEmpty()}}}
+function syncProjectControl(){const button=$('#composerProjectButton'),label=$('#composerProjectLabel');button.hidden=Boolean(state.active);label.textContent=t(!state.workspaceSelected?'Choose project':state.projectless?'Tasks':($('#projectName').textContent||'Project'));syncFileBrowsers()}
 function refreshComposerPlaceholder(){const followUpType=state.active?(state.active.source==='cloud'?'cloud':'local'):undefined;$('#prompt').placeholder=resolveComposerPlaceholder({followUpType,composerMode:state.composerMode,cloudStartingState:state.cloudStartingState,isBackgroundSubagentsPanelVisible:state.backgroundAgentsVisible,isGoalModeActive:state.goalMode,isPlanModeActive:state.planMode,placeholderText:state.placeholderText,isHome:!state.active})}
 function setWorkspace(path){const name=path.split('/').filter(Boolean).at(-1)||path,resolved=path.replace(/^~/,state.config.home);workspaceContextRequestGate.next();state.projectless=false;state.workspaceSelected=true;state.workspaceContext={cwd:resolved,project:name,environment:'Local',branch:null};$('#projectPath').textContent=shortPath(path);$('#projectName').textContent=name;rememberDraftWorkspace();syncProjectControl();if(!state.active)showEmpty();if(!$('#summaryPanel').hidden)syncSummaryPanel();syncWorkspaceContext(resolved);if(state.connected)loadPermissionProfiles()}
 function setProjectless(){workspaceContextRequestGate.next();state.projectless=true;state.workspaceSelected=true;state.workspaceContext=null;$('#projectPath').textContent='~';$('#projectName').textContent=t('Tasks');rememberDraftWorkspace();syncProjectControl();if(!state.active){$('#threadPath').textContent='';showEmpty()}if(!$('#summaryPanel').hidden)syncSummaryPanel();if(state.connected)loadPermissionProfiles()}
-function resetReviewState(){state.turnDiffs.clear();state.activeReview=null;reviewPatchState='undo';$('#reviewTab').hidden=true;if(!$('#reviewPanelContent').hidden)setSidePanelView('launcher','New tab');renderChanges()}
+function resetReviewState(){state.turnDiffs.clear();state.activeReview=null;reviewPinnedTurn=null;reviewPatchState='undo';reviewPatchStates.clear();reviewRenderer.reset();renderChanges()}
 function clearConversationRuntime(){for(const card of state.requestCards.values())card.remove();state.requestCards.clear();for(const animation of state.motion.values())animation?.destroy?.();state.items.clear();state.turns.clear();state.activities.clear();state.activityItems.clear();state.sideTasks.clear();state.dividers.clear();state.motion.clear();renderSideTasks()}
 function threadRouteId(){return new URLSearchParams(location.search).get('thread')||null}
 function rememberActiveThread(id,{replace=false}={}){
@@ -248,7 +276,7 @@ function rememberActiveThread(id,{replace=false}={}){
   if(route!==location.pathname+location.search+location.hash)history[replace?'replaceState':'pushState']({},'',route);
 }
 function rememberDraftWorkspace(){if(state.active||threadRouteId())return;history.replaceState({...history.state,codexWebuiDraftWorkspace:state.workspaceSelected?{projectless:state.projectless,cwd:state.workspaceContext?.cwd||null}:null},'',location.href)}
-function clearWorkspaceSelection(){workspaceContextRequestGate.next();state.workspaceSelected=false;state.projectless=false;state.workspaceContext=null;$('#projectPath').textContent='';$('#projectName').textContent='';$('#threadPath').textContent='';rememberDraftWorkspace();syncProjectControl();if(state.connected)void loadPermissionProfiles()}
+function clearWorkspaceSelection(){workspaceContextRequestGate.next();state.workspaceSelected=false;state.projectless=false;state.workspaceContext=null;$('#projectPath').textContent='';$('#projectName').textContent='';$('#threadPath').textContent='';rememberDraftWorkspace();syncProjectControl();syncSummaryPanel();if(state.connected)void loadPermissionProfiles()}
 function restoreDraftWorkspace(){const draft=history.state?.codexWebuiDraftWorkspace;if(draft?.projectless)setProjectless();else if(typeof draft?.cwd==='string'&&draft.cwd)setWorkspace(draft.cwd);else clearWorkspaceSelection()}
 async function restoreLocation(){
   if(state.initializing)return;
@@ -259,7 +287,7 @@ async function restoreLocation(){
   const currentPage=settingsRoutePage();if(currentPage)showSettings(currentPage,{updateRoute:false});else hideSettings();
 }
 function startNewTask({projectKey,updateRoute=true,replaceRoute=false}={}){
-  threadOpenRequestGate.next();state.threadLoading=false;projectControls?.closeMenu(false);threadControls?.closeMenu(false);
+  threadOpenRequestGate.next();promptHistory.reset();state.threadLoading=false;projectControls?.closeMenu(false);threadControls?.closeMenu(false);
   composerAttachments?.clear();resetActiveThreadSync();setActiveTurnId('');if(updateRoute){hideSettings();rememberActiveThread(null,{replace:replaceRoute})}
   state.active=null;goalControls?.selectThread(null);state.composerMentions=[];state.turnWindow=null;clearConversationRuntime();state.changes.clear();resetReviewState();closeComposerAutocomplete();
   if(projectKey==='__tasks__')setProjectless();else if(projectKey)setWorkspace(projectKey);else clearWorkspaceSelection();
@@ -274,7 +302,7 @@ function sidebarProjectKey(thread={}){return thread.projectless||!thread.cwd?'__
 function sidebarProjectName(key){if(key==='__tasks__')return'Tasks';if(key===state.config.home)return'Home';return key.split('/').filter(Boolean).at(-1)||key}
 function currentSidebarProjectKey(){if(!state.active&&!state.workspaceSelected)return'';if(state.projectless)return'__tasks__';return String(state.active?.cwd||state.workspaceContext?.cwd||$('#projectPath').textContent||'').replace(/^~/,state.config.home).replace(/\/+$/,'')}
 function saveSidebarProjectExpansion(){localStorage.setItem(SIDEBAR_PROJECT_EXPANSION_KEY,JSON.stringify(sidebarProjectExpansion))}
-function updateThreadMetadata(id,changes){for(const thread of state.threads)if(thread.id===id)Object.assign(thread,changes);if(state.active?.id===id){Object.assign(state.active,changes);if(Object.hasOwn(changes,'name'))renderHeader()}renderThreads();refreshThreadsSoon()}
+function updateThreadMetadata(id,changes){for(const thread of state.threads)if(thread.id===id)Object.assign(thread,changes);if(state.active?.id===id){Object.assign(state.active,changes);if(Object.hasOwn(changes,'name'))renderHeader();syncSummaryPanel()}renderThreads();refreshThreadsSoon()}
 function removeThreadFromSidebar(id){state.threads=state.threads.filter(thread=>thread.id!==id);if(state.active?.id===id)startNewTask();else renderThreads();refreshThreadsSoon()}
 function restoreThreadToProject(thread){state.threads=state.threads.filter(item=>item.id!==thread.id);state.threads.unshift(thread);sidebarProjectExpansion[sidebarProjectKey(thread)]=true;saveSidebarProjectExpansion();renderThreads();refreshThreadsSoon()}
 function renderThreads(){
@@ -284,21 +312,28 @@ function renderThreads(){
   const pinned=state.threads.filter(thread=>thread.pinnedAt&&matches(thread)).sort((a,b)=>b.pinnedAt-a.pinnedAt);
   $('#pinnedThreadsSection').hidden=!pinned.length;
   for(const thread of pinned)pinnedList.append(threadControls.createRow(thread));
-  for(const thread of state.threads){if(!matches(thread))continue;const key=sidebarProjectKey(thread),group=groups.get(key)||{key,threads:[],recency:0};if(!thread.pinnedAt)group.threads.push(thread);group.recency=Math.max(group.recency,Number(thread.recencyAt||thread.updatedAt)||0);groups.set(key,group)}
+  for(const thread of state.threads){if(!matches(thread))continue;const key=sidebarProjectKey(thread),group=groups.get(key)||{key,threads:[],recency:0};if(!thread.pinnedAt)group.threads.push(thread);group.recency=Math.max(group.recency,threadRecency(thread));groups.set(key,group)}
   if(!q&&!state.active&&state.workspaceSelected){const key=currentSidebarProjectKey();if(key&&!groups.has(key))groups.set(key,{key,threads:[],recency:0})}
   const currentKey=currentSidebarProjectKey(),ordered=[...groups.values()].sort((a,b)=>(a.key===currentKey?-1:b.key===currentKey?1:b.recency-a.recency));
   for(const group of ordered){
+    group.threads.sort((a,b)=>threadRecency(b)-threadRecency(a));
+    const activeIndex=group.threads.findIndex(thread=>thread.id===state.active?.id);
+    const limit=Math.max(sidebarProjectLimits.get(group.key)||SIDEBAR_PAGE_SIZE,Math.ceil((activeIndex+1)/SIDEBAR_PAGE_SIZE)*SIDEBAR_PAGE_SIZE);
+    if(!q)sidebarProjectLimits.set(group.key,limit);
+    const visible=q?group.threads:group.threads.slice(0,limit),hasMore=visible.length<group.threads.length;
     const containsActive=group.threads.some(thread=>thread.id===state.active?.id),expanded=Boolean(q)||(Object.hasOwn(sidebarProjectExpansion,group.key)?sidebarProjectExpansion[group.key]:containsActive||group.key===currentKey),section=document.createElement('section');section.className='sidebar-project-group';section.dataset.project=group.key;
     const heading=document.createElement('button');heading.type='button';heading.className='sidebar-project-row';heading.setAttribute('aria-expanded',String(expanded));heading.title=group.key==='__tasks__'?t('Tasks'):shortPath(group.key);heading.innerHTML=`${codexIcon(group.key==='__tasks__'?'messageSquare':'folderOpen')}<span data-i18n-ignore>${escapeHtml(sidebarProjectName(group.key))}</span>${codexIcon('chevronRight','sidebar-project-chevron')}`;const toolbar=document.createElement('div');toolbar.className='sidebar-project-toolbar';toolbar.append(heading,projectControls.createActions(group.key));section.append(toolbar);
-    const threads=document.createElement('div');threads.className='sidebar-project-threads'+(expanded?' expanded':'');threads.setAttribute('aria-hidden',String(!expanded));threads.style.setProperty('--sidebar-thread-count',String(group.threads.length));
-    heading.onclick=()=>{const next=heading.getAttribute('aria-expanded')!=='true';sidebarProjectExpansion[group.key]=next;saveSidebarProjectExpansion();heading.setAttribute('aria-expanded',String(next));threads.setAttribute('aria-hidden',String(!next));threads.classList.toggle('expanded',next)};
-    for(const thread of group.threads)threads.append(threadControls.createRow(thread));section.append(threads);list.append(section);
+    const threads=document.createElement('div');threads.className='sidebar-project-threads'+(expanded?' expanded':'');threads.setAttribute('aria-hidden',String(!expanded));threads.inert=!expanded;threads.style.setProperty('--sidebar-thread-count',String(visible.length+Number(hasMore)));
+    heading.onclick=()=>{const next=heading.getAttribute('aria-expanded')!=='true';sidebarProjectExpansion[group.key]=next;saveSidebarProjectExpansion();heading.setAttribute('aria-expanded',String(next));threads.setAttribute('aria-hidden',String(!next));threads.classList.toggle('expanded',next);threads.inert=!next};
+    for(const thread of visible)threads.append(threadControls.createRow(thread));
+    if(hasMore){const more=document.createElement('button');more.type='button';more.className='sidebar-show-more';more.textContent=t('Show more');more.onclick=()=>{sidebarProjectLimits.set(group.key,limit+SIDEBAR_PAGE_SIZE);const scroll=$('.sidebar-scroll'),top=scroll.scrollTop;renderThreads();scroll.scrollTop=top;const updated=[...list.children].find(node=>node.dataset.project===group.key);(updated?.querySelector('.sidebar-show-more')||updated?.querySelector('.sidebar-project-row'))?.focus({preventScroll:true})};threads.append(more)}
+    section.append(threads);list.append(section);
   }
   if(!list.children.length&&!pinned.length){const empty=document.createElement('div');empty.className='list-state';empty.textContent=t('No matching tasks');list.append(empty)}
   threadControls?.afterRender();projectControls?.afterRender();
 }
 async function openThread(id,fallbackSummary=null,{updateRoute=true}={}){
-  const request=threadOpenRequestGate.next();state.threadLoading=true;
+  const request=threadOpenRequestGate.next();promptHistory.reset();state.threadLoading=true;
   projectControls?.closeMenu(false);
   if(state.active?.id!==id)composerAttachments?.clear();
   const listedSummary=state.threads.find(x=>x.id===id),summary=listedSummary||fallbackSummary,deferTransition=Boolean(fallbackSummary&&!listedSummary);
@@ -315,7 +350,11 @@ async function openThread(id,fallbackSummary=null,{updateRoute=true}={}){
     if(!result.thread?.id)throw new Error(t('This task could not be found. Refresh the task list and try again.'));
     const thread={...(summary||{}),...result.thread};resetActiveThreadSync();setActiveTurnId('');state.active=thread;goalControls?.selectThread(thread.id);if(updateRoute)rememberActiveThread(thread.id);state.composerMentions=[];state.turnWindow=null;clearConversationRuntime();state.changes.clear();resetReviewState();closeComposerAutocomplete();renderContextTray();renderContextUsage();renderHeader();renderThreads();$('#conversation').innerHTML='';
     if((thread.turns||[]).length)renderThread(thread);else $('#conversation').innerHTML='<div class="list-state conversation-loading">No conversation history loaded. Send a message to continue.</div>';
-    renderPendingSteers();renderPendingApprovals();scrollOpenedThreadToBottom();scheduleActiveThreadSync(0);return true;
+    renderPendingSteers();renderPendingApprovals();scrollOpenedThreadToBottom();scheduleActiveThreadSync(0);
+    // Null means an unloaded history entry; only an explicit denial means another writer.
+    if(thread.canAcceptDirectInput===false)blockedThreads.add(id);else blockedThreads.delete(id);
+    syncComposerSubmitState();
+    return threadOpenRequestGate.isCurrent(request);
   }catch(error){
     if(!threadOpenRequestGate.isCurrent(request))return false;
     if(deferTransition){toast(error?.message||'Could not load side task');return false}
@@ -324,7 +363,7 @@ async function openThread(id,fallbackSummary=null,{updateRoute=true}={}){
   }finally{if(threadOpenRequestGate.isCurrent(request)){state.threadLoading=false;syncComposerSubmitState()}}
 }
 
-function renderHeader(){const t=state.active;if(!t)return;goalControls?.selectThread(t.id);$('#threadTitle').textContent=titleOf(t);if(t.projectless){state.projectless=true;state.workspaceSelected=true;state.workspaceContext=null;$('#projectName').textContent='Tasks';$('#projectPath').textContent='~';$('#threadPath').textContent=''}else{$('#threadPath').textContent=shortPath(t.cwd);setWorkspace(t.cwd||state.config.home)}syncProjectControl();refreshComposerPlaceholder();$('#threadSource').textContent=t.source||'local'}
+function renderHeader(){const t=state.active;if(!t)return;goalControls?.selectThread(t.id);$('#threadTitle').textContent=titleOf(t);if(t.projectless){state.projectless=true;state.workspaceSelected=true;state.workspaceContext=null;$('#projectName').textContent='Tasks';$('#projectPath').textContent='~';$('#threadPath').textContent=''}else{$('#threadPath').textContent=shortPath(t.cwd);setWorkspace(t.cwd||state.config.home)}syncProjectControl();refreshComposerPlaceholder();$('#threadSource').textContent=t.source||'local';syncSummaryPanel()}
 function renderThread(thread,loadMore=0){const root=$('#conversation'),turns=thread.turns||[];state.turnWindow=createTurnWindow(turns,DEFAULT_TURN_PAGE_SIZE,state.turnWindow?.threadId===thread.id?state.turnWindow.start:undefined,loadMore);state.turnWindow.threadId=thread.id;clearConversationRuntime();root.innerHTML='';if(state.turnWindow.hiddenCount){const more=document.createElement('button');more.className='load-older';more.textContent=`Load earlier messages (${state.turnWindow.hiddenCount})`;more.onclick=()=>renderThread(thread,DEFAULT_TURN_PAGE_SIZE);root.append(more)}for(const turn of state.turnWindow.visible)renderTurn(turn,root);renderPendingSteers();renderPendingApprovals();if(!root.children.length)showEmpty();else if(!loadMore)scrollBottom()}
 function showEmpty(){const root=$('#conversation'),project=state.projectless||!state.workspaceSelected?null:(state.workspaceContext?.project||$('#projectName').textContent?.trim()),loading=state.initializing;root.innerHTML=`<div class="empty-state${loading?' connecting':''}" id="emptyState"${loading?' role="status" aria-label="Connecting to Codex" aria-busy="true"':''}>${codexInterfaceMark('empty-codex-mark')}${loading?'':`<h1>${project?`What can I help with in ${escapeHtml(project)}?`:'What can I help?'}</h1>`}</div>`}
 function ensureTurnTimeline(turnId,root=$('#conversation')){let turn=state.turns.get(turnId);if(turn?.isConnected)return turn;root.querySelector('#emptyState')?.remove();turn=document.createElement('article');turn.className='turn assistant-turn native-turn-timeline';turn.dataset.turnId=turnId;turn.dataset.threadId=state.active?.id||'';turn.innerHTML='<div class="assistant-body"><div class="turn-event-stream"></div></div><div class="turn-final-slot"></div>';const footer=initializeTurnPresentation(turn);footer.querySelector('[data-copy-reply]').onclick=()=>void copyTurnReply(turn);footer.querySelector('[data-fork-reply]').onclick=()=>void forkTurnReply(turn);root.append(turn);state.turns.set(turnId,turn);state.dividers.set(turnId,footer);return turn}
@@ -446,7 +485,45 @@ function placeAgentMessage(el,item,timeline){const commentary=item.phase==='comm
 function imageCwd(item={}){return item.cwd||state.active?.cwd||state.config.defaultCwd||'.'}
 function sideTaskStatus(item,threadId){const agent=item.agentsStates?.[threadId];if(agent?.status)return agent.status;if(item.type==='subAgentActivity')return item.kind==='interrupted'?'interrupted':'running';return item.status==='failed'?'errored':item.status==='completed'?'completed':'running'}
 function updateSideTasks(item){if(item.type==='collabAgentToolCall'){for(const threadId of item.receiverThreadIds||[]){const previous=state.sideTasks.get(threadId)||{};state.sideTasks.set(threadId,{...previous,threadId,prompt:item.prompt||previous.prompt||'',model:item.model||previous.model||'',reasoningEffort:item.reasoningEffort||previous.reasoningEffort||'',status:sideTaskStatus(item,threadId),message:item.agentsStates?.[threadId]?.message||previous.message||''})}}else if(item.type==='subAgentActivity'){const previous=state.sideTasks.get(item.agentThreadId)||{};state.sideTasks.set(item.agentThreadId,{...previous,threadId:item.agentThreadId,agentPath:item.agentPath||previous.agentPath||'',status:sideTaskStatus(item,item.agentThreadId)})}renderSideTasks()}
-function renderSideTasks(){const list=$('#sideTaskList');if(!list)return;list.innerHTML='';for(const task of state.sideTasks.values()){const button=document.createElement('button');button.type='button';button.className='side-task-card';button.dataset.threadId=task.threadId;button.innerHTML=`${codexIcon('messageSquare')}<span class="side-task-copy"><strong>${escapeHtml(task.agentPath||task.model||'Side task')}</strong><small>${escapeHtml(task.message||task.prompt||task.threadId)}</small></span><span class="side-task-status ${escapeHtml(task.status||'running')}">${escapeHtml(task.status||'running')}</span>`;button.onclick=async()=>{button.disabled=true;button.setAttribute('aria-busy','true');await openThread(task.threadId,{id:task.threadId,name:task.agentPath||task.model||'Side task',preview:task.prompt||task.message||'',cwd:state.active?.cwd||state.config.defaultCwd,source:'local',sideTask:true});if(button.isConnected){button.disabled=false;button.removeAttribute('aria-busy')}};list.append(button)}if(!state.sideTasks.size)list.innerHTML='<div class="side-task-empty">Side tasks started by this chat will appear here.</div>';const summary=$('#summarySideTasks');if(summary)summary.textContent=state.sideTasks.size?`${state.sideTasks.size} side task${state.sideTasks.size===1?'':'s'}`:'No side tasks'}
+function sideTasksVisible(){return !$('#sidePanel').hidden&&!$('#sideTaskPanel').hidden}
+function relatedChatSnapshot(){
+  if(state.connected&&!state.threadLoading&&(!$('#summaryPanel').hidden||sideTasksVisible()||state.serverRequests.snapshot().length))void sessionTree.refresh(state.active,state.threads);
+  return sessionTree.snapshot(state.active,state.threads);
+}
+function sideTaskEntries(family){
+  const tasks=new Map(state.sideTasks);
+  for(const thread of subagentThreads(family.threads,state.active?.id)){
+    const previous=tasks.get(thread.id)||{},type=thread.status?.type;
+    const status=type==='active'?'running':type==='systemError'?'errored':type==='idle'?'idle':type==='notLoaded'?'notLoaded':previous.status||'unknown';
+    tasks.set(thread.id,{...previous,...thread,threadId:thread.id,status,message:previous.message||thread.preview||''});
+  }
+  return [...tasks.values()];
+}
+function renderSideTasks(){
+  const list=$('#sideTaskList');if(!list)return;
+  subagentPreview.syncOwner();list.hidden=Boolean(subagentPreview.selected);
+  const family=relatedChatSnapshot(),tasks=sideTaskEntries(family),labels={running:'Working',pendingInit:'Starting',completed:'Completed',idle:'Idle',notLoaded:'Not loaded',errored:'Session error',interrupted:'Interrupted',unknown:'Status unavailable'};
+  const waiting=new Set(state.serverRequests.snapshot().filter(isApprovalRequest).map(req=>req.params?.threadId));
+  for(const task of tasks)if(waiting.has(task.threadId))task.status='waiting';labels.waiting='Waiting for approval';
+  const cards=tasks.map(task=>`<button type="button" class="side-task-card" data-thread-id="${escapeHtml(task.threadId)}" style="--subagent-depth:${Math.min(Math.max((task.depth||1)-1,0),3)}">${codexIcon('messageSquare')}<span class="side-task-copy"><strong>${escapeHtml(task.agentNickname||task.agentPath||task.name||task.model||t('Subagent'))}</strong><small>${escapeHtml(task.message||task.prompt||task.threadId)}</small></span><span class="side-task-status ${escapeHtml(task.status||'unknown')}">${escapeHtml(t(labels[task.status]||'Status unavailable'))}</span></button>`).join('');
+  const markup=cards+(family.error?`<div class="side-task-empty">${escapeHtml(t('Could not load related chats'))}<small>${escapeHtml(family.error)}</small><button type="button" data-retry-subagents>${escapeHtml(t('Retry'))}</button></div>`:!tasks.length?`<div class="side-task-empty" role="status">${escapeHtml(t(family.loading?'Loading subagents…':'Subagents started by this chat will appear here.'))}</div>`:'');
+  if(markup!==sideTaskListMarkup){list.innerHTML=markup;sideTaskListMarkup=markup}
+}
+$('#sideTaskList').addEventListener('click',event=>{
+  if(event.target.closest('[data-retry-subagents]')){void sessionTree.refresh(state.active,state.threads,true);renderSideTasks();return}
+  const button=event.target.closest('[data-thread-id]');if(!button)return;
+  const task=sideTaskEntries(sessionTree.snapshot(state.active,state.threads)).find(task=>task.threadId===button.dataset.threadId);if(!task)return;
+  showSubagentPreview(task);
+});
+function showSubagentPreview(task){
+  const thread={...task,id:task.threadId||task.id,name:task.name||task.agentPath||task.model||t('Subagent'),cwd:task.cwd||state.active?.cwd};
+  subagentPreview.open(thread);if(sideTabs.active?.kind==='side-task'){sideTabs.active.previewThread=thread;sideTabs.active.previewOwner=state.active?.id}$('#sideTaskList').hidden=true;renderPendingApprovals();
+}
+function openSubagentApproval(threadId){
+  const task=sideTaskEntries(sessionTree.snapshot(state.active,state.threads)).find(task=>task.threadId===threadId);if(!task)return;
+  openUtilityPanel('side-task');showSubagentPreview(task);
+}
+$('#backSideTasks').onclick=()=>{subagentPreview.close();if(sideTabs.active?.kind==='side-task')sideTabs.active.previewThread=null;renderSideTasks();renderPendingApprovals()};
 function upsertItem(item,turnId,root=$('#conversation'),live=true){
   root.querySelector('#emptyState')?.remove();
   let el=state.items.get(item.id);if(!el&&item.type==='userMessage')el=claimOptimisticUser(item,root,turnId);if(!el&&item.type==='agentMessage')el=claimEquivalentAgentMessage(item,turnId);if(!el){
@@ -508,17 +585,75 @@ function updateCommandRowSummary(row,item,data,expanded=row.classList.contains('
 function updateActivitySummary(activity){const turn=activity.closest('[data-turn-id]'),turnId=turn?.dataset.turnId,allItems=state.activityItems.get(turnId),rows=[...activity.querySelectorAll('.activity-item')],items=rows.map(row=>allItems?.get(row.dataset.itemId)).filter(Boolean),summary=activity.querySelector('.activity-summary-copy');if(!turn||!summary)return;activity.classList.toggle('single',items.length===1);const activeItem=items.findLast?.(item=>summarizeActivity(item).active)||[...items].reverse().find(item=>summarizeActivity(item).active),savedOpen=savedActivityGroupExpansion(activity);if(activeItem){const data=summarizeActivity(activeItem);setActivitySummaryIcon(activity,activeItem);summary.textContent=data.label;summary.classList.add('loading-shimmer');activity.classList.add('active');setActivityGroupOpen(activity,items.length===1||(savedOpen??true))}else{setActivitySummaryIcon(activity,completedActivityPrimaryItem(items));summary.textContent=completedActivitySummary(items);summary.classList.remove('loading-shimmer');activity.classList.remove('active');setActivityGroupOpen(activity,items.length===1||(savedOpen??false))}syncWorkedForDivider(turnId)}
 function addActivity(item,activity,id=activityItemId(item)){item=settleActivityItem(item,activity.closest('[data-turn-id]')?.dataset.turnStatus);const data=summarizeActivity(item),turn=activity.closest('[data-turn-id]'),turnId=turn.dataset.turnId,items=state.activityItems.get(turnId)||new Map,box=activity.querySelector('.activity-items');items.set(id,item);state.activityItems.set(turnId,items);let row=box.querySelector(`[data-item-id="${CSS.escape(id)}"]`);if(!row){row=document.createElement('div');row.className='activity-item entering';row.dataset.itemId=id;box.append(row);const out=document.createElement('div');out.className='activity-output';box.append(out)}const imageView=item.type==='imageView',reasoning=item.type==='reasoning',command=item.type==='commandExecution'&&data.category==='command',fileChange=item.type==='fileChange',wasActive=row.dataset.activityWasActive==='true',savedExpanded=savedActivityItemExpansion(row),existingExpanded=row.dataset.expansionInitialized?row.classList.contains('expanded'):imageView,expanded=reasoning?(data.active?true:wasActive?false:(savedExpanded??existingExpanded)):(savedExpanded??existingExpanded);row.dataset.expansionInitialized='true';row.dataset.activityWasActive=String(data.active);row.className=`activity-item ${command?'command-activity ':''}${reasoning?'reasoning-activity ':''}${imageView?'image-activity ':''}${fileChange?'file-change-activity ':''}${data.active?'active':'settled'} ${data.tone}`;if(command){state.motion.get(row)?.destroy();state.motion.delete(row);row.innerHTML=`<span class="activity-command-icon">${icons.terminal}</span><div class="activity-copy"><div class="activity-name ${data.active?'loading-shimmer':''}">${escapeHtml(commandRowSummary(item,data,expanded))}</div></div><span class="activity-command-chevron">${icons.chevron}</span>`}else if(reasoning){state.motion.get(row)?.destroy();state.motion.delete(row);row.innerHTML=`<div class="activity-copy"><div class="activity-name ${data.active?'loading-shimmer':''}">${escapeHtml(data.label)}</div></div><span class="activity-reasoning-chevron">${icons.chevron}</span>`}else{const detail=shortPath(data.detail||'');row.innerHTML=`${motionIcon(data.animation)}<div class="activity-copy"><div class="activity-name ${data.active?'loading-shimmer':''}"><span class="activity-label">${escapeHtml(data.label)}</span>${detail?` <span class="activity-detail">${escapeHtml(detail)}</span>`:''}</div></div><span class="activity-result">${fileChange?icons.chevron:''}</span>`}const out=row.nextElementSibling;renderActivityOutput(out,item,data);const reasoningOutput=reasoning&&!!activityOutput(item),expandable=imageView||command||fileChange||(reasoning&&!data.active&&reasoningOutput)||(!reasoning&&!isExplorationActivity(item,data)&&!!activityOutput(item));if(reasoning&&data.active&&reasoningOutput){row.removeAttribute('role');row.removeAttribute('aria-expanded');row.tabIndex=-1;row.classList.add('expanded')}else if(expandable){row.setAttribute('role','button');row.tabIndex=0;setActivityExpanded(row,expanded)}else{row.removeAttribute('role');row.removeAttribute('aria-expanded');row.tabIndex=-1;row.classList.remove('expanded')}row.onclick=expandable?()=>{const next=!row.classList.contains('expanded');setActivityExpanded(row,next,true);if(command)updateCommandRowSummary(row,item,data,next)}:null;row.onkeydown=expandable?event=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();row.click()}}:null;if(!command&&!reasoning){if(data.active)mountMotion(row,data.animation);else stopMotion(row,data.tone)}updateActivitySummary(activity)}
 function diffForTurn(turnId){return state.turnDiffs.get(turnId)||null}
-function recordTurnReview(turnId,raw,source='fileChange'){if(!turnId||!raw)return null;const existing=state.turnDiffs.get(turnId);if(source!=='native'&&existing?.source==='native')return existing;const review=parseUnifiedDiff(raw);if(!review.hasChanges)return null;review.turnId=turnId;review.raw=raw;review.source=source;state.turnDiffs.set(turnId,review);state.activeReview=review;$('#reviewTab').hidden=false;renderChanges();return review}
+function recordTurnReview(turnId,raw,source='fileChange'){
+  if(!turnId||!raw)return null;
+  const existing=state.turnDiffs.get(turnId);
+  if(source!=='native'&&existing?.source==='native')return existing;
+  if(existing?.raw===raw&&existing.source===source)return existing;
+  const review=parseUnifiedDiff(raw);if(!review.hasChanges)return null;
+  Object.assign(review,{turnId,raw,source});state.turnDiffs.set(turnId,review);
+  if(!reviewPinnedTurn||reviewPinnedTurn===turnId)state.activeReview=review;
+  renderChanges();return review;
+}
 function syncTurnReviewFromItems(turnId){const items=state.activityItems.get(turnId),changes=items?[...items.values()].flatMap(item=>item?.type==='fileChange'&&Array.isArray(item.changes)?item.changes:[]):[],raw=unifiedDiffFromFileChanges(changes);if(raw)recordTurnReview(turnId,raw)}
 function saveReviewPreferences(){localStorage.setItem('codex-webui-review-preferences',JSON.stringify(reviewPreferences))}
 function reviewLineHtml(line){if(!line)return '<div class="review-line empty"><span class="review-sign"></span><code></code></div>';return `<div class="review-line ${line.type}"><span class="review-sign">${line.type==='add'?'+':line.type==='delete'?'−':' '}</span><code>${escapeHtml(line.text)}</code></div>`}
-function reviewHunkHtml(hunk){if(reviewPreferences.mode==='split'){return `<div class="review-split-lines">${splitDiffHunk(hunk).map(row=>`<div class="review-split-row"><div class="review-side old">${reviewLineHtml(row.left)}</div><div class="review-side new">${reviewLineHtml(row.right)}</div></div>`).join('')}</div>`}return `<div class="review-lines">${hunk.lines.map(reviewLineHtml).join('')}</div>`}
-function syncReviewControls(review){const has=!!review?.hasChanges;$('#reviewMode').disabled=!has;$('#reviewWrap').disabled=!has;$('#reviewExpand').disabled=!has;$('#reviewPatch').disabled=!has||!state.active?.id||!review?.turnId;$('#reviewMode').title=reviewPreferences.mode==='unified'?'Switch to split diff':'Switch to unified diff';$('#reviewWrap').title=reviewPreferences.wrap?'Disable word wrap':'Enable word wrap';$('#reviewExpand').title=reviewPreferences.expanded?'Collapse all diffs':'Expand all diffs';$('#reviewPatch').title=reviewPatchState==='undo'?'Undo changes':'Reapply changes';$('#reviewPatch').innerHTML=codexIcon(reviewPatchState==='undo'?'undo':'redo')}
-function renderChanges(){const list=$('#changeList'),review=state.activeReview||[...state.turnDiffs.values()].at(-1)||null,reviewVisible=document.body.classList.contains('side-panel-open')&&!$('#reviewPanelContent').hidden;document.body.classList.toggle('review-split-open',reviewVisible&&reviewPreferences.mode==='split'&&!!review?.hasChanges&&innerWidth>1200);list.dataset.mode=reviewPreferences.mode;list.classList.toggle('wrap',reviewPreferences.wrap);if(review?.hasChanges){$('#changeCount').textContent=review.fileCount;$('#changeSummary').textContent=`${review.fileCount} changed file${review.fileCount===1?'':'s'}`;$('#reviewStats').innerHTML=`<span class="plus">+${review.linesAdded}</span><span class="minus">−${review.linesDeleted}</span>`;list.innerHTML='';for(const file of review.files){const section=document.createElement('section');section.className='review-file';section.dataset.path=file.path;section.innerHTML=`<button class="review-file-head" aria-expanded="${reviewPreferences.expanded}">${codexIcon('chevronDown','review-chevron')}<span class="review-file-name">${escapeHtml(shortPath(file.path))}</span><span class="review-file-stats"><span class="plus">+${file.linesAdded}</span><span class="minus">−${file.linesDeleted}</span></span></button><div class="review-hunks"${reviewPreferences.expanded?'':' hidden'}></div>`;const body=section.querySelector('.review-hunks');for(const hunk of file.hunks){const h=document.createElement('div');h.className='review-hunk';h.innerHTML=`<div class="review-hunk-head">${escapeHtml(hunk.header)}</div>${reviewHunkHtml(hunk)}`;body.append(h)}section.querySelector('.review-file-head').onclick=e=>{const open=e.currentTarget.getAttribute('aria-expanded')==='true';e.currentTarget.setAttribute('aria-expanded',String(!open));body.hidden=open};list.append(section)}syncReviewControls(review);return}$('#reviewStats').textContent='';$('#changeCount').textContent=state.changes.size;$('#changeSummary').textContent=state.changes.size?`${state.changes.size} changed file${state.changes.size===1?'':'s'}`:'No changes yet';list.innerHTML='';for(const [path,ch] of state.changes){const el=document.createElement('div');el.className='change-item';el.innerHTML=`<div class="change-path">${icons.file}<span>${escapeHtml(shortPath(path))}</span></div><div class="change-stats"><span class="plus">+${ch.additions||0}</span> <span class="minus">−${ch.deletions||0}</span></div>`;list.append(el)}if(!state.changes.size)list.innerHTML='<div class="panel-empty">Changes made by Codex will appear here.</div>';syncReviewControls(null)}
-async function applyActiveReviewPatch(){const review=state.activeReview;if(!review?.turnId||!state.active?.id)return;const action=reviewPatchState,button=$('#reviewPatch');button.disabled=true;button.innerHTML=codexIcon('loaderCircle','review-loading');try{const response=await fetch('/api/review/patch',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({threadId:state.active.id,turnId:review.turnId,action})}),result=await response.json();if(!response.ok)throw new Error(result.error||'Review patch failed');reviewPatchState=action==='undo'?'reapply':'undo';toast(action==='undo'?'Changes reverted':'Changes reapplied')}catch(error){toast(error.message)}finally{syncReviewControls(review)}}
+function syncReviewControls(review){
+  const has=!!review?.hasChanges,textual=review?.files.some(file=>file.hunks.length>0);
+  $('#reviewMode').disabled=!textual;$('#reviewWrap').disabled=!textual;$('#reviewExpand').disabled=!has;
+  reviewPatchState=reviewPatchStates.get(review?.turnId)||'undo';
+  const patchPending=reviewPatchRequests.has(`${state.active?.id}:${review?.turnId}`);
+  const relativePatch=review?.source==='native'||review?.files.every(file=>!file.path.startsWith('/'));
+  const cwd=state.active?.cwd,root=state.config.reviewRoot;
+  const withinRoot=cwd&&(!root||cwd===root||cwd.startsWith(root+'/'));
+  $('#reviewPatch').disabled=!textual||!state.active?.id||!review?.turnId||!relativePatch||!withinRoot||patchPending;
+  $('#reviewMode').title=reviewPreferences.mode==='unified'?'Switch to split diff':'Switch to unified diff';
+  $('#reviewWrap').title=reviewPreferences.wrap?'Disable word wrap':'Enable word wrap';
+  $('#reviewMode').setAttribute('aria-pressed',String(reviewPreferences.mode==='split'));
+  $('#reviewWrap').setAttribute('aria-pressed',String(reviewPreferences.wrap));
+  $('#reviewExpand').title=reviewPreferences.expanded?'Collapse all diffs':'Expand all diffs';
+  $('#reviewPatch').title=!relativePatch||!withinRoot?'Undo requires a saved relative patch inside the review workspace.':reviewPatchState==='undo'?'Undo changes':'Reapply changes';$('#reviewPatch').innerHTML=patchPending?codexIcon('loaderCircle','review-loading'):codexIcon(reviewPatchState==='undo'?'undo':'redo');
+  const selector=$('#reviewTurnSelect'),reviews=[...state.turnDiffs.values()];
+  selector.replaceChildren();selector.parentElement.hidden=reviews.length<2;
+  reviews.forEach((entry,index)=>{const option=document.createElement('option');option.value=entry.turnId;option.textContent=t('Change {number}',{number:index+1})+(index===reviews.length-1?' · '+t('Latest changes'):'');selector.append(option)});
+  selector.value=review?.turnId||'';
+}
+function renderChanges(){
+  const list=$('#changeList'),review=state.activeReview||[...state.turnDiffs.values()].at(-1)||null;
+  const reviewVisible=document.body.classList.contains('side-panel-open')&&!$('#reviewPanelContent').hidden;
+  document.body.classList.toggle('review-split-open',reviewVisible&&reviewPreferences.mode==='split'&&!!review?.hasChanges&&innerWidth>1200);
+  list.dataset.mode=reviewPreferences.mode;list.classList.toggle('wrap',reviewPreferences.wrap);list.replaceChildren();
+  if(review?.hasChanges){
+    $('#changeSummary').textContent=`${review.fileCount} changed file${review.fileCount===1?'':'s'}`;
+    $('#reviewStats').innerHTML=`<span class="plus">+${review.linesAdded}</span><span class="minus">−${review.linesDeleted}</span>`;
+    for(const file of review.files)list.append(reviewRenderer.file(file,reviewPreferences,review.turnId));
+  }else{
+    $('#reviewStats').textContent='';$('#changeSummary').textContent=state.changes.size?`${state.changes.size} changed file${state.changes.size===1?'':'s'}`:'No changes yet';
+    for(const [path,change] of state.changes)list.append(reviewRenderer.file({path,hunks:[],linesAdded:change.additions,linesDeleted:change.deletions},reviewPreferences));
+    if(!state.changes.size){const empty=document.createElement('div');empty.className='panel-empty';empty.textContent=t('Changes made by Codex will appear here.');list.append(empty)}
+  }
+  syncReviewControls(review);
+}
+async function applyActiveReviewPatch(){
+  const review=state.activeReview,threadId=state.active?.id;
+  if(!review?.turnId||!threadId)return;
+  const action=reviewPatchState,key=`${threadId}:${review.turnId}`;
+  if(reviewPatchRequests.has(key))return;
+  reviewPatchRequests.add(key);syncReviewControls(review);
+  try{
+    const response=await fetch('/api/review/patch',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({threadId,turnId:review.turnId,action})}),result=await response.json();
+    if(!response.ok)throw new Error(result.error||'Review patch failed');
+    if(state.active?.id===threadId){reviewPatchStates.set(review.turnId,action==='undo'?'reapply':'undo');toast(action==='undo'?'Changes reverted':'Changes reapplied')}
+  }catch(error){if(state.active?.id===threadId)toast(error.message)}
+  finally{reviewPatchRequests.delete(key);syncReviewControls(state.activeReview||[...state.turnDiffs.values()].at(-1)||null)}
+}
 function applyTerminalInteraction(p){const itemId=String(p.itemId),current=state.activityItems.get(p.turnId)?.get(itemId);if(current?.type!=='commandExecution')return;let buffer=current.terminalInputBuffer||'',commands=[];for(const char of String(p.stdin||'')){if(char==='\r'||char==='\n'){const command=buffer.trim();if(command)commands.push(command);buffer='';continue}if(char==='\u0003'){buffer='';continue}if(char==='\b'||char==='\u007f'){buffer=buffer.slice(0,-1);continue}buffer+=char}const actions=[...(current.commandActions||[]),...commands.map(command=>({type:'unknown',command}))];upsertItem({...current,status:'inProgress',terminalInputBuffer:buffer,commandActions:actions},p.turnId)}
 
 function onNotification(method,p){
+  for(const entry of sideTabs.values())entry.sideChat?.notification(method,p);
+  if(method==='thread/started'&&p.thread?.ephemeral)return;
+  sessionTree.notification(method,p);
+  if(sideTasksVisible())renderSideTasks();
   goalControls?.notification(method,p);
   threadControls?.notification(method,p);
   trackCompactionNotification(method,p);
@@ -526,7 +661,7 @@ function onNotification(method,p){
   if(p.threadId&&(method==='turn/started'||method==='turn/completed'))updateThreadMetadata(p.threadId,{status:{type:method==='turn/started'?'active':'idle'}});
   if(p.threadId&&p.threadId!==state.active?.id&&(method==='error'||method.startsWith('turn/')||method.startsWith('item/')))return;
   if(method==='account/updated')loadAccount(true);
-  else if(method==='thread/started'){const index=state.threads.findIndex(thread=>thread.id===p.thread.id);if(index<0)state.threads.unshift(p.thread);else state.threads[index]={...state.threads[index],...p.thread};renderThreads()}
+  else if(method==='thread/started'){if(parentThreadId(p.thread)){syncSummaryPanel();renderSideTasks();return}const index=state.threads.findIndex(thread=>thread.id===p.thread.id);if(index<0)state.threads.unshift(p.thread);else state.threads[index]={...state.threads[index],...p.thread};renderThreads()}
   else if(method==='thread/name/updated')updateThreadMetadata(p.threadId,{name:p.name});
   else if(method==='host/thread/pinned')updateThreadMetadata(p.threadId,{pinnedAt:p.pinnedAt});
   else if(method==='thread/archived')removeThreadFromSidebar(p.threadId);
@@ -551,7 +686,8 @@ function onNotification(method,p){
 function upsertReasoningDelta(p,field){const itemId=String(p.itemId),items=state.activityItems.get(p.turnId),current=items?.get(itemId),item=current?.type==='reasoning'?{...current,status:'inProgress'}:{id:itemId,type:'reasoning',status:'inProgress',summary:[],content:[]};if(field){const index=field==='summary'?(p.summaryIndex??0):(p.contentIndex??0),parts=Array.isArray(item[field])?[...item[field]]:[];while(parts.length<=index)parts.push('');parts[index]=(parts[index]||'')+(p.delta||'');item[field]=parts}upsertItem(item,p.turnId);scrollBottom()}
 function setApprovalWaiting(group,itemId,waiting){if(!group)return;const row=itemId?group.querySelector(`[data-item-id="${CSS.escape(itemId)}"]`):null,summary=group.querySelector('.activity-summary-copy');group.classList.toggle('waiting-approval',waiting);if(waiting){summary.textContent='Waiting for approval';summary.classList.remove('loading-shimmer');if(row){row.querySelector('.activity-name')?.classList.remove('loading-shimmer');state.motion.get(row)?.pause()}}else{if(row){const turnId=group.closest('[data-turn-id]')?.dataset.turnId,active=summarizeActivity(state.activityItems.get(turnId)?.get(String(itemId))||{}).active;row.querySelector('.activity-name')?.classList.toggle('loading-shimmer',active);if(active)state.motion.get(row)?.play();else stopMotion(row)}updateActivitySummary(group)}}
 function approvalIcon(kind){return kind==='network'?codexIcon('globe'):kind==='patch'?codexIcon('fileDiff'):kind==='permission'?codexIcon('shield'):codexIcon('terminal')}
-function approvalBody(model,p){if(model.kind==='exec'||model.kind==='network')return `<div class="approval-command"><code>${escapeHtml(p.command||model.title)}</code></div>`;if(model.kind==='patch'){const review=diffForTurn(p.turnId);return review?.hasChanges?`<button type="button" class="approval-review-link">${codexIcon('fileDiff')}<span>Review ${review.fileCount} changed file${review.fileCount===1?'':'s'}</span><span class="plus">+${review.linesAdded}</span><span class="minus">−${review.linesDeleted}</span></button>`:''}return permissionRows(p.permissions).map(row=>`<div class="permission-row"><span>${escapeHtml(row.label)}</span><code>${escapeHtml(shortPath(row.value))}</code></div>`).join('')}
+function sideChatForThread(threadId){return sideTabs.values().find(entry=>entry.sideChat?.threadId===threadId)?.sideChat}
+function approvalBody(model,p){if(model.kind==='patch'&&sideChatForThread(p.threadId))return '';if(model.kind==='exec'||model.kind==='network')return `<div class="approval-command"><code>${escapeHtml(p.command||model.title)}</code></div>`;if(model.kind==='patch'){if(p.threadId!==state.active?.id)return `<button type="button" class="approval-review-link">${codexIcon('fileDiff')}<span>${escapeHtml(t('View subagent changes'))}</span></button>`;const review=diffForTurn(p.turnId);return review?.hasChanges?`<button type="button" class="approval-review-link">${codexIcon('fileDiff')}<span>Review ${review.fileCount} changed file${review.fileCount===1?'':'s'}</span><span class="plus">+${review.linesAdded}</span><span class="minus">−${review.linesDeleted}</span></button>`:''}return permissionRows(p.permissions).map(row=>`<div class="permission-row"><span>${escapeHtml(row.label)}</span><code>${escapeHtml(shortPath(row.value))}</code></div>`).join('')}
 function replyUnsupportedRequest(req){void respondToCodex(req.id,null,{code:-32601,message:'Unsupported request'}).catch(error=>{if(!error?.silentTransportSwitch)toast(error.message)})}
 function onServerRequests(requests=[]){
   state.serverRequests.replace(requests);
@@ -563,18 +699,34 @@ function onServerRequest(req){
   state.serverRequests.record(req);renderPendingApprovals();
 }
 function renderPendingApprovals(){
-  const requests=state.serverRequests.snapshot(),visible=requests.filter(req=>isApprovalRequest(req)&&req.params?.threadId===state.active?.id),ids=new Set(visible.map(req=>req.id));
-  for(const[id,card]of state.requestCards){
-    if(ids.has(id)&&card.isConnected)continue;
-    const context=approvalContexts.get(card);
-    if(context)setApprovalWaiting(context.group,context.itemId,false);
-    card.remove();state.requestCards.delete(id);
+  const requests=state.serverRequests.snapshot().filter(isApprovalRequest),family=sessionTree.snapshot(state.active,state.threads);
+  if(state.connected&&state.active&&requests.some(req=>req.params?.threadId!==state.active.id&&!sideChatForThread(req.params?.threadId)))void sessionTree.refresh(state.active,state.threads);
+  const tasks=sideTaskEntries(family),descendants=new Map(tasks.map(task=>[task.threadId,task]));
+  const childRequests=requests.filter(req=>descendants.has(req.params?.threadId));
+  let queue=$('#subagentApprovalQueue');
+  if(childRequests.length&&!queue){queue=document.createElement('section');queue.id='subagentApprovalQueue';queue.className='subagent-approval-queue';const title=document.createElement('h2');title.textContent=t('Subagents waiting for approval');queue.append(title);$('#conversation').append(queue)}
+  const preview=$('[data-subagent-approvals]'),previewId=subagentPreview.selected?.id;
+  const surfaces=[];
+  for(const req of requests)if(state.active&&req.params?.threadId===state.active.id)surfaces.push({key:`main:${typeof req.id}:${req.id}`,req});
+  for(const req of childRequests){
+    const agent=descendants.get(req.params.threadId);surfaces.push({key:`child:${typeof req.id}:${req.id}`,req,mount:queue,agent});
+    if(previewId===req.params.threadId&&sideTasksVisible())surfaces.push({key:`preview:${typeof req.id}:${req.id}`,req,mount:preview,agent});
   }
-  for(const req of visible){
-    const card=state.requestCards.get(req.id),context=card&&approvalContexts.get(card);
-    if(!card)renderApprovalCard(req);
+  for(const entry of sideTabs.values()){const chat=entry.sideChat;if(!chat)continue;const own=requests.filter(req=>req.params?.threadId===chat.threadId);chat.approvals.hidden=!own.length;for(const req of own)surfaces.push({key:`side:${entry.id}:${typeof req.id}:${req.id}`,req,mount:chat.approvals})}
+  const ids=new Set(surfaces.map(surface=>surface.key));
+  for(const[key,card]of state.requestCards){
+    if(ids.has(key)&&card.isConnected)continue;
+    const context=approvalContexts.get(card);if(context)setApprovalWaiting(context.group,context.itemId,false);
+    card.remove();state.requestCards.delete(key);
+  }
+  for(const surface of surfaces){
+    const card=state.requestCards.get(surface.key),context=card&&approvalContexts.get(card);
+    if(!card)renderApprovalCard(surface.req,surface);
     else if(context)setApprovalWaiting(context.group,context.itemId,true);
   }
+  if(!childRequests.length)queue?.remove();else if(queue!==$('#conversation').lastElementChild)$('#conversation').append(queue);
+  preview.hidden=!surfaces.some(surface=>surface.mount===preview);
+  syncSummaryPanel();renderSideTasks();
 }
 function closeApprovalMenus(path=[]){
   for(const card of state.requestCards.values()){
@@ -583,22 +735,29 @@ function closeApprovalMenus(path=[]){
     menu.hidden=true;toggle?.setAttribute('aria-expanded','false');
   }
 }
-function renderApprovalCard(req){const p=req.params||{};const group=ensureActivity(p.turnId||'approval',$('#conversation'),p.itemId),model=buildApprovalModel(req),card=document.createElement('section');card.className='approval-card';card.dataset.codexApprovalSurface='';card.innerHTML=`<div class="approval-content"><div class="approval-identity">${approvalIcon(model.kind)}<span>${escapeHtml(model.identity)}</span></div><div class="approval-title">${escapeHtml(model.title)}</div>${model.subtitle?`<div class="approval-subtitle">${escapeHtml(shortPath(model.subtitle))}</div>`:''}${model.reason?`<div class="approval-reason"><span>Reason</span><p>${escapeHtml(model.reason)}</p></div>`:''}</div><div class="approval-body">${approvalBody(model,p)}</div><form class="approval-actions">${model.leading?`<button type="button" class="approval-leading">${escapeHtml(model.leading.label)}</button>`:''}<div class="approval-actions-main"><button type="button" class="approval-deny">${escapeHtml(model.deny.label)}</button>${model.scoped?`<div class="approval-split"><button type="submit" class="approval-primary" autofocus>${escapeHtml(model.primary.label)}</button><button type="button" class="approval-menu-toggle" aria-label="Approval options" aria-expanded="false">${codexIcon('chevronDown')}</button><div class="approval-menu" hidden><button type="button" class="approval-scoped">${escapeHtml(model.scoped.label)}</button></div></div>`:`<button type="submit" class="approval-primary" autofocus>${escapeHtml(model.primary.label)}</button>`}</div></form>`;group.after(card);state.requestCards.set(req.id,card);approvalContexts.set(card,{group,itemId:p.itemId});setApprovalWaiting(group,p.itemId,true);const answer=async(decision)=>{
-  card.querySelectorAll('button').forEach(button=>button.disabled=true);
+function renderApprovalCard(req,{key,mount=null,agent=null}){const p=req.params||{};const group=mount?null:ensureActivity(p.turnId||'approval',$('#conversation'),p.itemId),model=buildApprovalModel(req),card=document.createElement('section');card.dataset.approvalThreadId=p.threadId||'';card.className='approval-card';card.dataset.codexApprovalSurface='';card.innerHTML=`<div class="approval-content"><div class="approval-identity">${approvalIcon(model.kind)}<span>${escapeHtml(model.identity)}</span></div><div class="approval-title">${escapeHtml(model.title)}</div>${model.subtitle?`<div class="approval-subtitle">${escapeHtml(shortPath(model.subtitle))}</div>`:''}${model.reason?`<div class="approval-reason"><span>Reason</span><p>${escapeHtml(model.reason)}</p></div>`:''}</div><div class="approval-body">${approvalBody(model,p)}</div><form class="approval-actions">${model.leading?`<button type="button" class="approval-leading">${escapeHtml(model.leading.label)}</button>`:''}<div class="approval-actions-main"><button type="button" class="approval-deny">${escapeHtml(model.deny.label)}</button>${model.scoped?`<div class="approval-split"><button type="submit" class="approval-primary" autofocus>${escapeHtml(model.primary.label)}</button><button type="button" class="approval-menu-toggle" aria-label="Approval options" aria-expanded="false">${codexIcon('chevronDown')}</button><div class="approval-menu" hidden><button type="button" class="approval-scoped">${escapeHtml(model.scoped.label)}</button></div></div>`:`<button type="submit" class="approval-primary" autofocus>${escapeHtml(model.primary.label)}</button>`}</div></form>`;if(agent){const label=document.createElement('button');label.type='button';label.className='approval-agent-label';label.innerHTML=`${codexIcon('messageSquare')}<span>${escapeHtml(t('Subagent'))} · ${escapeHtml(agent.agentNickname||agent.agentPath||agent.name||agent.threadId)}</span>`;label.onclick=()=>openSubagentApproval(p.threadId);card.prepend(label)}
+  if(mount)mount.append(card);else group.after(card);state.requestCards.set(key,card);approvalContexts.set(card,{group,itemId:p.itemId,requestId:req.id});setApprovalWaiting(group,p.itemId,true);
+  const copies=()=>[...state.requestCards.values()].filter(node=>approvalContexts.get(node)?.requestId===req.id);
+  if(approvalAnswers.has(req.id))card.querySelectorAll('button').forEach(button=>button.disabled=true);
+  const answer=async(decision)=>{
+  if(approvalAnswers.has(req.id)||!state.serverRequests.has(req.id))return;
+  approvalAnswers.add(req.id);for(const node of copies())node.querySelectorAll('button').forEach(button=>button.disabled=true);
   try{
     await respondToCodex(req.id,model.kind==='permission'?decision:{decision});
     state.serverRequests.resolve(req.id);renderPendingApprovals();
   }catch(error){
-    if(!card.isConnected)return;
-    card.querySelectorAll('button').forEach(button=>button.disabled=false);
-    if(!error?.silentTransportSwitch){
-      let notice=card.querySelector('[data-approval-error]');
-      if(!notice){notice=document.createElement('div');notice.className='turn-request-error';notice.dataset.approvalError='';notice.setAttribute('role','alert');card.append(notice)}
-      notice.textContent=threadInputErrorMessage(error);
+    for(const node of copies()){
+      node.querySelectorAll('button').forEach(button=>button.disabled=false);
+      if(!error?.silentTransportSwitch){
+        let notice=node.querySelector('[data-approval-error]');
+        if(!notice){notice=document.createElement('div');notice.className='turn-request-error';notice.dataset.approvalError='';notice.setAttribute('role','alert');node.append(notice)}
+        notice.textContent=threadInputErrorMessage(error);
+      }
     }
-  }
-};card.querySelector('form').onsubmit=e=>{e.preventDefault();answer(model.primary.decision)};card.querySelector('.approval-deny').onclick=()=>answer(model.deny.decision);card.querySelector('.approval-scoped')?.addEventListener('click',()=>answer(model.scoped.decision));card.querySelector('.approval-leading')?.addEventListener('click',()=>answer(model.leading.decision));card.querySelector('.approval-review-link')?.addEventListener('click',()=>openReviewPanel(diffForTurn(p.turnId)));const menuToggle=card.querySelector('.approval-menu-toggle'),menu=card.querySelector('.approval-menu');menuToggle?.addEventListener('click',()=>{const open=menu.hidden;menu.hidden=!open;menuToggle.setAttribute('aria-expanded',String(open))});scrollBottom()}
+  }finally{approvalAnswers.delete(req.id)}
+};card.querySelector('form').onsubmit=e=>{e.preventDefault();answer(model.primary.decision)};card.querySelector('.approval-deny').onclick=()=>answer(model.deny.decision);card.querySelector('.approval-scoped')?.addEventListener('click',()=>answer(model.scoped.decision));card.querySelector('.approval-leading')?.addEventListener('click',()=>answer(model.leading.decision));card.querySelector('.approval-review-link')?.addEventListener('click',()=>p.threadId===state.active?.id?openReviewPanel(diffForTurn(p.turnId)):openSubagentApproval(p.threadId));const menuToggle=card.querySelector('.approval-menu-toggle'),menu=card.querySelector('.approval-menu');menuToggle?.addEventListener('click',()=>{const open=menu.hidden;menu.hidden=!open;menuToggle.setAttribute('aria-expanded',String(open))});if(mount!==$('[data-subagent-approvals]'))scrollBottom()}
 const slashCommandCatalog=[
+  {id:'side',title:'Side chat',description:'Ask a side question without interrupting this chat',icon:'messageSquare'},
   {id:'model',title:'Model',description:'Choose model and reasoning effort',icon:'wrench'},
   {id:'goal',title:'Goal',description:'Set and manage a persistent goal',icon:'check'},
   {id:'plan',title:'Plan mode',description:'Turn plan mode on',icon:'list'},
@@ -618,16 +777,67 @@ function moveComposerAutocomplete(delta){if(!autocompleteState.items.length)retu
 function setPlanMode(active){state.planMode=Boolean(active);refreshComposerPlaceholder();syncPermissionControl()}
 function applyAutocompleteToken(match,replacement){const input=$('#prompt'),result=applyComposerSuggestion(input.value,match,replacement);input.value=result.text;input.setSelectionRange(result.cursor,result.cursor);resizePrompt()}
 function renderContextTray(){const tray=$('#composerContextTray');tray.innerHTML='';for(const mention of state.composerMentions){const chip=document.createElement('div');chip.className='composer-context-chip';chip.dataset.contextId=mention.id;chip.innerHTML=`${codexIcon(mention.icon||'file')}<span>${escapeHtml(mention.title)}</span><button type="button" aria-label="Remove ${escapeHtml(mention.title)}">${codexIcon('x')}</button>`;chip.querySelector('button').onclick=()=>{state.composerMentions=state.composerMentions.filter(item=>item.id!==mention.id);renderContextTray()};tray.append(chip)}tray.hidden=!state.composerMentions.length}
-function selectComposerAutocomplete(index=autocompleteState.selected){const item=autocompleteState.items[index],match=autocompleteState.match;if(!item||!match)return;const id=item.id;if(id==='goal'&&!state.active&&!state.workspaceSelected){applyAutocompleteToken(match,'/goal');closeComposerAutocomplete();requireWorkspaceSelection();return}if(item.source==='action'&&id==='choose-project'){closeComposerAutocomplete();openFolderPicker()}else if(item.source==='file'||item.source==='folder'){applyAutocompleteToken(match,`@${item.path}`);if(!state.composerMentions.some(mention=>mention.id===item.id))state.composerMentions.push({...item});renderContextTray();closeComposerAutocomplete()}else if(item.source==='task'){applyAutocompleteToken(match,`@${item.title}`);if(!state.composerMentions.some(mention=>mention.id===item.id))state.composerMentions.push({...item});renderContextTray();closeComposerAutocomplete()}else{if(id==='init')applyAutocompleteToken(match,'/init');closeComposerAutocomplete();if(id==='goal'){applyAutocompleteToken(match,'');if(!$('#prompt').value.trim())$('#prompt').value='';resizePrompt();goalControls.openEditor()}else if(id==='plan'){setPlanMode(!state.planMode);$('#prompt').value='';resizePrompt()}else if(id==='model'){ $('#prompt').value='';resizePrompt();openModelMenu()}else if(id==='reasoning'){ $('#prompt').value='';resizePrompt();openModelMenu()}else if(id==='project'){ $('#prompt').value='';resizePrompt();openFolderPicker()}else if(id==='mcp'){ $('#prompt').value='';resizePrompt();toast('MCP status requires the native desktop status surface.')}else if(id==='compact'){applyAutocompleteToken(match,'/compact');void compactActiveThread()}else if(id==='status'){ $('#prompt').value='';resizePrompt();toast(state.active?.id?`Task ${state.active.id}`:'No active task')}}requestAnimationFrame(()=>$('#prompt').focus())}
-function handlePromptInput(){resizePrompt();updateComposerAutocomplete()}
+function selectComposerAutocomplete(index=autocompleteState.selected){const item=autocompleteState.items[index],match=autocompleteState.match;if(!item||!match)return;const id=item.id;if(id==='goal'&&!state.active&&!state.workspaceSelected){applyAutocompleteToken(match,'/goal');closeComposerAutocomplete();requireWorkspaceSelection();return}if(item.source==='action'&&id==='choose-project'){closeComposerAutocomplete();openFolderPicker()}else if(item.source==='file'||item.source==='folder'){applyAutocompleteToken(match,`@${item.path}`);if(!state.composerMentions.some(mention=>mention.id===item.id))state.composerMentions.push({...item});renderContextTray();closeComposerAutocomplete()}else if(item.source==='task'){applyAutocompleteToken(match,`@${item.title}`);if(!state.composerMentions.some(mention=>mention.id===item.id))state.composerMentions.push({...item});renderContextTray();closeComposerAutocomplete()}else{if(id==='init')applyAutocompleteToken(match,'/init');closeComposerAutocomplete();if(id==='side'){applyAutocompleteToken(match,'');void openSideChat();return}else if(id==='goal'){applyAutocompleteToken(match,'');if(!$('#prompt').value.trim())$('#prompt').value='';resizePrompt();goalControls.openEditor()}else if(id==='plan'){setPlanMode(!state.planMode);$('#prompt').value='';resizePrompt()}else if(id==='model'){ $('#prompt').value='';resizePrompt();openModelMenu()}else if(id==='reasoning'){ $('#prompt').value='';resizePrompt();openModelMenu()}else if(id==='project'){ $('#prompt').value='';resizePrompt();openFolderPicker()}else if(id==='mcp'){ $('#prompt').value='';resizePrompt();toast('MCP status requires the native desktop status surface.')}else if(id==='compact'){applyAutocompleteToken(match,'/compact');void compactActiveThread()}else if(id==='status'){ $('#prompt').value='';resizePrompt();toast(state.active?.id?`Task ${state.active.id}`:'No active task')}}requestAnimationFrame(()=>$('#prompt').focus())}
+function handlePromptInput(){promptHistory.reset();resizePrompt();updateComposerAutocomplete()}
 // Preserve IME confirmation keys, including Safari keyCode 229, before handling composer shortcuts.
-function handlePromptKeydown(event){if(event.isComposing||event.keyCode===229)return;const open=!$('#composerAutocomplete').hidden;if(open&&!autocompleteState.items.length&&/^\s*\/compact(?:\s|$)/.test($('#prompt').value)&&event.key==='Enter'&&!event.shiftKey){event.preventDefault();$('#composer').requestSubmit();return}if(open){if(event.key==='ArrowDown'||event.key==='ArrowUp'){event.preventDefault();moveComposerAutocomplete(event.key==='ArrowDown'?1:-1);return}if((event.key==='Enter'&&!event.shiftKey)||event.key==='Tab'){event.preventDefault();selectComposerAutocomplete();return}if(event.key==='Escape'){event.preventDefault();closeComposerAutocomplete();return}}if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();$('#composer').requestSubmit()}}
-async function resumeActiveThread(threadId=state.active?.id){if(!threadId)return null;const resumed=await rpc('thread/resume',{threadId});if(state.active?.id===threadId){state.active={...state.active,...resumed.thread};renderHeader()}return resumed}
+function handlePromptKeydown(event){
+  if(event.isComposing||event.keyCode===229){promptHistory.reset();return}
+  const input=$('#prompt'),open=!$('#composerAutocomplete').hidden;
+  if(open&&parseSideCommand(input.value)&&event.key==='Enter'&&!event.shiftKey){event.preventDefault();$('#composer').requestSubmit();return}
+  if(open&&!autocompleteState.items.length&&/^\s*\/compact(?:\s|$)/.test(input.value)&&event.key==='Enter'&&!event.shiftKey){event.preventDefault();$('#composer').requestSubmit();return}
+  if(open){
+    if(event.key==='ArrowDown'||event.key==='ArrowUp'){event.preventDefault();moveComposerAutocomplete(event.key==='ArrowDown'?1:-1);return}
+    if((event.key==='Enter'&&!event.shiftKey)||event.key==='Tab'){event.preventDefault();selectComposerAutocomplete();return}
+    if(event.key==='Escape'){event.preventDefault();closeComposerAutocomplete();return}
+  }
+  if(!event.shiftKey&&!event.altKey&&!event.ctrlKey&&!event.metaKey){
+    const recalled=promptHistory.navigate(event.key,input.value,state.active?.id||'');
+    if(recalled!==null){event.preventDefault();input.value=recalled;input.setSelectionRange(recalled.length,recalled.length);resizePrompt();return}
+  }
+  if(!['Shift','Control','Alt','Meta'].includes(event.key))promptHistory.reset();
+  if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();$('#composer').requestSubmit()}
+}
+function threadInputBlocked(){return Boolean(state.active&&blockedThreads.has(state.active.id))}
+function recordThreadInputError(threadId,error,generation=activeThreadSyncGeneration){if(threadId&&state.active?.id===threadId&&generation===activeThreadSyncGeneration&&bridgeErrorCode(error)===THREAD_ACTIVE_WRITER){blockedThreads.add(threadId);closeComposerAutocomplete();closeModelMenu();closePermissionMenu();syncComposerSubmitState()}}
+async function resumeActiveThread(threadId=state.active?.id,options={}){
+  if(!threadId)return null;
+  const generation=activeThreadSyncGeneration;
+  let request=threadResumeRequests.get(threadId);
+  if(!request){request=rpc('thread/resume',{threadId,...options});threadResumeRequests.set(threadId,request)}
+  try{
+    const resumed=await request;
+    if(state.active?.id===threadId&&generation===activeThreadSyncGeneration){blockedThreads.delete(threadId);state.active={...state.active,...resumed.thread,turns:options.excludeTurns?state.active.turns:resumed.thread?.turns||state.active.turns};renderHeader();syncComposerSubmitState()}
+    return resumed;
+  }catch(error){recordThreadInputError(threadId,error,generation);throw error}
+  finally{if(threadResumeRequests.get(threadId)===request)threadResumeRequests.delete(threadId)}
+}
+async function retryBlockedThread(){
+  const threadId=state.active?.id,generation=activeThreadSyncGeneration;
+  if(!threadId||blockedThreadActions.has(threadId))return;
+  blockedThreadActions.add(threadId);syncComposerSubmitState();
+  try{await resumeActiveThread(threadId,{deferGoalContinuation:true,excludeTurns:true});if(state.active?.id===threadId&&generation===activeThreadSyncGeneration)$('#prompt').focus()}
+  catch(error){if(state.active?.id===threadId&&generation===activeThreadSyncGeneration&&!error?.silentTransportSwitch)toast(t(threadInputErrorMessage(error)),5200)}
+  finally{blockedThreadActions.delete(threadId);syncComposerSubmitState()}
+}
+async function forkBlockedThread(){
+  const threadId=state.active?.id,generation=activeThreadSyncGeneration;
+  if(!threadId||blockedThreadActions.has(threadId))return;
+  blockedThreadActions.add(threadId);syncComposerSubmitState();
+  try{
+    const result=await rpc('thread/fork',{threadId,deferGoalContinuation:true}),fork=result?.thread;
+    if(!fork?.id||fork.id===threadId)throw new Error('Could not create branch');
+    if(!state.threads.some(thread=>thread.id===fork.id))state.threads.unshift(fork);
+    renderThreads();refreshThreadsSoon();
+    if(state.active?.id===threadId&&generation===activeThreadSyncGeneration)await openThread(fork.id,fork);
+    toast(t(result.namingError||'Branch created'));
+  }catch(error){if(!error?.silentTransportSwitch)toast(t(error.message||'Could not create branch'),5200)}
+  finally{blockedThreadActions.delete(threadId);syncComposerSubmitState()}
+}
 async function ensureGoalThread(){
   if(state.active){
     const threadId=state.active.id;
     if(state.active.canAcceptDirectInput!==true){
-      const resumed=await rpc('thread/resume',{threadId});
+      const resumed=await resumeActiveThread(threadId);
       if(state.active?.id!==threadId)throw new Error('Task changed. Try again in the selected task.');
       state.active={...state.active,...resumed.thread};renderHeader();
     }
@@ -711,7 +921,10 @@ async function interruptForSteering(threadId=state.active?.id,turnId=activeTurnI
   }finally{clearTimeout(timeout);clearTimeout(poll);steeringInterrupts.delete(key);syncComposerSubmitState()}
 }
 async function submitPrompt(event){
-  event.preventDefault();if(state.threadLoading||promptAdmissions.has(activeThreadSyncGeneration)&&!activeTurnId())return;closeComposerAutocomplete();closePermissionMenu();
+  event.preventDefault();
+  const sideCommand=parseSideCommand($('#prompt').value);
+  if(sideCommand){const draft=$('#prompt').value;closeComposerAutocomplete();closePermissionMenu();await openSideChat(sideCommand.prompt);if($('#prompt').value===draft){$('#prompt').value='';resizePrompt()}return}
+  if(threadInputBlocked()||state.threadLoading||promptAdmissions.has(activeThreadSyncGeneration)&&!activeTurnId())return;closeComposerAutocomplete();closePermissionMenu();
   const input=$('#prompt'),text=input.value.trim(),turnId=activeTurnId();
   if([...steeringInterrupts.keys()].some(key=>key.startsWith(`${state.active?.id}:`)))return;
   if(/^\/compact(?:\s|$)/.test(text)){if(text!=='/compact')toast(t('Usage: /compact'));else await compactActiveThread();return}
@@ -730,7 +943,7 @@ async function submitPrompt(event){
   const generation=activeThreadSyncGeneration,sourceThread=state.active;
   const clientId=createClientMessageId(),optimistic={id:`local-${clientId}`,clientId,type:'userMessage',content:userInput};
   upsertItem(optimistic,turnId||'optimistic');
-  input.value='';state.composerMentions=[];renderContextTray();resizePrompt();
+  promptHistory.remember(input.value,sourceThread?.id||'');input.value='';state.composerMentions=[];renderContextTray();resizePrompt();
   const restoreInput=()=>{
     if(generation!==activeThreadSyncGeneration)return;
     state.items.get(optimistic.id)?.remove();state.items.delete(optimistic.id);
@@ -754,6 +967,7 @@ async function submitPrompt(event){
       }
       if(failure?.silentTransportSwitch){const uncertain=pendingSteers.update(clientId,'unconfirmed');if(uncertain)renderSteeringDelivery(uncertain);scheduleActiveThreadSync(0)}
       else if(pendingSteers.remove(clientId))restoreInput();
+      recordThreadInputError(steeringThreadId,failure,generation);
       if(!failure?.silentTransportSwitch){toast(t(threadInputErrorMessage(failure)),5200);if(steeringThreadId===state.active?.id)showConversationError({...failure,message:threadInputErrorMessage(failure)},{turnId})}
     }finally{finishSubmission();steeringSubmissions.delete(clientId)}
     return;
@@ -772,7 +986,7 @@ async function submitPrompt(event){
         renderContextUsage();renderHeader();renderThreads();
       }
     }else if(target.canAcceptDirectInput!==true){
-      const resumed=await rpc('thread/resume',{threadId:requestThreadId});target={...target,...resumed.thread};
+      const resumed=await resumeActiveThread(requestThreadId);target={...target,...resumed.thread};
       if(generation===activeThreadSyncGeneration&&requestThreadId===state.active?.id){state.active=target;renderHeader()}
     }
     const result=await rpc('turn/start',{threadId:requestThreadId,clientUserMessageId:clientId,input:userInput,model,effort,cwd:target.cwd||cwd,...turnPolicy});
@@ -781,21 +995,25 @@ async function submitPrompt(event){
       renderTurn(turn,$('#conversation'),true);syncTurnRuntime(turn);scrollBottom();
     }
   }catch(error){
-    restoreInput();
+    restoreInput();recordThreadInputError(requestThreadId,error,generation);
     if(!error?.silentTransportSwitch){toast(t(threadInputErrorMessage(error)),5200);if(generation===activeThreadSyncGeneration&&requestThreadId===state.active?.id)showConversationError(error,{terminal:true})}
   }finally{promptAdmissions.delete(generation);syncComposerSubmitState()}
 
 }
 function threadSummarySignature(threads){return JSON.stringify(threads.map(thread=>[thread.id,thread.name,thread.preview,thread.pinnedAt,thread.updatedAt,thread.recencyAt,thread.status]))}
-function applyThreadSummaries(threads){const nextSignature=threadSummarySignature(threads),changed=nextSignature!==threadListSignature;threadListSignature=nextSignature;state.threads=threads;const summary=state.active&&threads.find(thread=>thread.id===state.active.id);if(summary){const turns=state.active.turns;const oldName=state.active.name;state.active={...state.active,...summary,turns};if(oldName!==state.active.name)renderHeader();if(summary.status?.type==='active')scheduleActiveThreadSync(0)}if(changed)renderThreads()}
+function applyThreadSummaries(threads){const nextSignature=threadSummarySignature(threads),changed=nextSignature!==threadListSignature;threadListSignature=nextSignature;state.threads=threads;const summary=state.active&&threads.find(thread=>thread.id===state.active.id);if(summary){const turns=state.active.turns;const oldName=state.active.name;state.active={...state.active,...summary,turns};if(oldName!==state.active.name)renderHeader();if(summary.status?.type==='active')scheduleActiveThreadSync(0)}if(changed)renderThreads();syncSummaryPanel();if(sideTasksVisible())renderSideTasks()}
 function scheduleThreadListRefresh(delay=THREAD_LIST_POLL_MS){clearTimeout(threadListTimer);threadListTimer=setTimeout(refreshThreadList,document.visibilityState==='hidden'?Math.max(delay,8000):delay)}
-async function refreshThreadList(){if(threadListInFlight){scheduleThreadListRefresh(1000);return}threadListInFlight=true;try{const result=await rpc('thread/list',{limit:50,sortKey:'recency_at',sortDirection:'desc'});applyThreadSummaries(result.data||[])}catch{}finally{threadListInFlight=false;scheduleThreadListRefresh()}}
+async function refreshThreadList(){if(threadListInFlight){scheduleThreadListRefresh(1000);return}threadListInFlight=true;try{const result=await loadSidebarThreads(rpc);applyThreadSummaries(result.data||[])}catch{}finally{threadListInFlight=false;scheduleThreadListRefresh()}}
 function refreshThreadsSoon(){scheduleThreadListRefresh(600)}
 function resetActiveThreadSync(){activeThreadSyncGeneration++;clearTimeout(activeThreadSyncTimer);activeThreadSyncTimer=null;activeThreadSyncSignature=''}
 function scheduleActiveThreadSync(delay=ACTIVE_THREAD_SYNC_IDLE_MS){clearTimeout(activeThreadSyncTimer);if(!state.active)return;activeThreadSyncTimer=setTimeout(syncActiveThread,document.visibilityState==='hidden'?Math.max(delay,6000):delay)}
-async function latestThreadTurn(threadId){try{const live=await rpc('host/thread/live',{threadId});if(live?.active&&live.turn)return live.turn}catch{}try{const result=await rpc('thread/turns/list',{threadId,limit:1,sortDirection:'desc',itemsView:'full'});return result.data?.[0]||null}catch{const result=await rpc('thread/read',{threadId,includeTurns:true});return result.thread?.turns?.at(-1)||null}}
+async function latestThreadTurn(threadId){try{const previousUsage=state.tokenUsage.get(threadId),live=await rpc('host/thread/live',{threadId});if(live?.tokenUsage&&state.tokenUsage.get(threadId)===previousUsage){const currentTotal=previousUsage?.total?.totalTokens,liveTotal=live.tokenUsage.total?.totalTokens;if(!previousUsage||Number.isFinite(liveTotal)&&(!Number.isFinite(currentTotal)||liveTotal>=currentTotal)){state.tokenUsage.set(threadId,live.tokenUsage);if(threadId===state.active?.id)renderContextUsage()}}if(live?.active&&live.turn)return live.turn}catch{}try{const result=await rpc('thread/turns/list',{threadId,limit:1,sortDirection:'desc',itemsView:'full'});return result.data?.[0]||null}catch{const result=await rpc('thread/read',{threadId,includeTurns:true});return result.thread?.turns?.at(-1)||null}}
 function activeTurnId(){return $('#sendButton')?.dataset.turnId||''}
-function syncComposerSubmitState(){const button=$('#sendButton');if(!button)return;const hasInput=Boolean($('#prompt').value.trim()||composerAttachments?.hasFiles()),mode=activeTurnId()?(hasInput?'steer':'stop'):'send',label=mode==='stop'?'Stop':mode==='steer'?'Steer':'Send message';button.disabled=Boolean(state.threadLoading||promptAdmissions.has(activeThreadSyncGeneration)&&!activeTurnId()||composerAttachments?.isUploading()&&mode!=='stop'||compactionRequests.has(state.active?.id)&&!activeTurnId()||[...steeringInterrupts.keys()].some(key=>key.startsWith(`${state.active?.id}:`)));button.dataset.submitMode=mode;button.classList.toggle('stop',mode==='stop');button.classList.toggle('steer',mode==='steer');button.innerHTML=codexIcon(mode==='stop'?'square':'arrowUp');button.title=t(label);button.setAttribute('aria-label',t(label))}
+function syncComposerSubmitState(){const button=$('#sendButton');if(!button)return;
+  const blocked=threadInputBlocked(),pending=blockedThreadActions.has(state.active?.id);
+  $('#composer').hidden=blocked;$('#composer').inert=blocked;$('#threadLocked').hidden=!blocked;
+  $('#retryThread').disabled=pending;$('#forkLockedThread').disabled=pending;$('#threadLocked').setAttribute('aria-busy',String(pending));
+  const hasInput=Boolean($('#prompt').value.trim()||composerAttachments?.hasFiles()),mode=activeTurnId()?(hasInput?'steer':'stop'):'send',label=mode==='stop'?'Stop':mode==='steer'?'Steer':'Send message';button.disabled=Boolean(blocked||state.threadLoading||promptAdmissions.has(activeThreadSyncGeneration)&&!activeTurnId()||composerAttachments?.isUploading()&&mode!=='stop'||compactionRequests.has(state.active?.id)&&!activeTurnId()||[...steeringInterrupts.keys()].some(key=>key.startsWith(`${state.active?.id}:`)));button.dataset.submitMode=mode;button.classList.toggle('stop',mode==='stop');button.classList.toggle('steer',mode==='steer');button.innerHTML=codexIcon(mode==='stop'?'square':'arrowUp');button.title=t(label);button.setAttribute('aria-label',t(label));syncSummaryPanel()}
 function setActiveTurnId(turnId=''){const button=$('#sendButton');if(!button)return;button.dataset.turnId=turnId||'';syncComposerSubmitState()}
 function syncTurnRuntime(turn){const knownStatus=state.turns.get(turn?.id)?.dataset.turnStatus,active=turn?.status==='inProgress'&&(!knownStatus||knownStatus==='inProgress');if(active)setActiveTurnId(turn.id);else if(activeTurnId()===turn?.id)setActiveTurnId('')}
 function syncTurnSnapshot(turn,threadId=state.active?.id){if(!turn||!threadId||threadId!==state.active?.id)return false;const root=$('#conversation'),nearBottom=root.scrollHeight-root.scrollTop-root.clientHeight<80,turns=state.active.turns||[],index=turns.findIndex(existing=>existing.id===turn.id);if(index<0)turns.push(turn);else turns[index]=turn;state.active.turns=turns;root.querySelectorAll('.conversation-loading').forEach(node=>node.remove());renderTurn(turn,root);renderPendingSteers();syncTurnRuntime(turn);if(nearBottom)scrollBottom();return true}
@@ -806,60 +1024,139 @@ function scrollOpenedThreadToBottom(){const root=$('#conversation'),apply=()=>{r
 function formatThreadTime(date){const pad=value=>String(value).padStart(2,'0');return `${pad(date.getMonth()+1)}/${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`}
 function escapeHtml(v=''){return String(v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 function toast(text,duration=2200){const e=$('#toast');e.textContent=text;e.classList.add('show');clearTimeout(toast.t);toast.t=setTimeout(()=>e.classList.remove('show'),duration)}
-function syncSummaryPanel(){const workspace=state.projectless?'No project':($('#projectName').textContent||'Local workspace');$('#summaryWorkspace').textContent=workspace;$('#summaryBranch').textContent=state.projectless?'':state.active?.source==='remote'?'Remote workspace':'Local workspace'}
-function overlayPanelsEnabled(){return matchMedia('(max-width:1200px)').matches}
+function syncSummaryPanel(){
+  const panel=$('#summaryPanel');if(panel.hidden)return;
+  const family=relatedChatSnapshot();if(statusChatsKey!==family.key){statusChatsKey=family.key;statusChatsExpanded=false}
+  const thread=state.active,permission=selectedPermission(),workspace=state.workspaceContext,content=renderSessionStatus({
+    relatedThreads:family.threads,relatedError:family.error,chatsExpanded:statusChatsExpanded,
+    thread,name:thread?titleOf(thread):'',loading:state.threadLoading,blocked:threadInputBlocked(),running:Boolean(activeTurnId()),
+    waitingApproval:state.serverRequests.snapshot().some(req=>isApprovalRequest(req)&&(req.params?.threadId===thread?.id||subagentThreads(family.threads,thread?.id).some(child=>child.id===req.params?.threadId))),
+    usage:thread?state.tokenUsage.get(thread.id):null,model:state.selectedModel,effort:reasoningLabel($('#effortSelect').value),
+    permission:{...permission,label:permission.kind==='legacy'?t(permission.label):permission.label},cwd:thread?.cwd||(state.workspaceSelected?workspace?.cwd:null),
+    branch:workspace?.cwd===(thread?.cwd||workspace?.cwd)?(workspace?.branch?(workspace.branch==='No branch'?t('No branch'):workspace.branch):null):null,
+    projectless:state.projectless,connected:state.connected,transport:state.transport,
+  },t),scroller=panel.querySelector('.summary-panel-scroll');
+  if(summaryPanelMarkup!==content){scroller.innerHTML=content;summaryPanelMarkup=content}
+}
+$('#summaryPanel').addEventListener('click',async event=>{
+  if(event.target.closest('[data-status-toggle-chats]')){statusChatsExpanded=!statusChatsExpanded;syncSummaryPanel();$('#summaryPanel [data-status-toggle-chats]')?.focus();return}
+  const open=event.target.closest('[data-status-open-thread]');if(open){const thread=sessionTree.snapshot(state.active,state.threads).threads.find(thread=>thread.id===open.dataset.statusOpenThread);if(thread){await openThread(thread.id,thread);if(overlayPanelsEnabled())setSummaryPanelOpen(false)}return}
+  const button=event.target.closest('[data-status-copy]');if(!button)return;
+  try{await copyReplyText(button.dataset.statusCopy);toast(t('ID copied'))}catch{toast(t('Could not copy ID'))}
+});
+function overlayPanelsEnabled(){return document.documentElement.classList.contains('mobile-device')||matchMedia('(max-width:1200px)').matches}
 function setOverlayBackgroundInert(inert){for(const selector of ['.topbar','.sidebar','.conversation-shell','.bottom-panel']){const node=$(selector);if(node)node.inert=inert}}
 function focusPanel(panel,closeButton){if(!overlayPanelsEnabled())return;setOverlayBackgroundInert(true);panel.setAttribute('aria-modal','true');requestAnimationFrame(()=>closeButton.focus())}
 function restorePanelFocus(panel,target){panel.setAttribute('aria-modal','false');if(!document.body.classList.contains('side-panel-open')&&!document.body.classList.contains('summary-panel-open'))setOverlayBackgroundInert(false);if(overlayPanelsEnabled()&&target?.isConnected)requestAnimationFrame(()=>target.focus())}
 function syncOverlayPanelMode(){const overlay=overlayPanelsEnabled(),sideOpen=document.body.classList.contains('side-panel-open'),summaryOpen=document.body.classList.contains('summary-panel-open');setOverlayBackgroundInert(overlay&&(sideOpen||summaryOpen));$('#sidePanel').setAttribute('aria-modal',String(overlay&&sideOpen));$('#summaryPanel').setAttribute('aria-modal',String(overlay&&summaryOpen));if(overlay){const panel=summaryOpen?$('#summaryPanel'):sideOpen?$('#sidePanel'):null,close=summaryOpen?$('#closeSummaryPanel'):sideOpen?$('#closeSidePanel'):null;if(panel&&close&&!panel.contains(document.activeElement))requestAnimationFrame(()=>close.focus())}renderChanges()}
-function setSidebarOpen(open){const sidebar=$('#sidebar'),mobile=mobileSidebarEnabled();document.body.classList.toggle('sidebar-hidden',!mobile&&!open);sidebar.classList.toggle('mobile-open',mobile&&open);const visible=mobile?sidebar.classList.contains('mobile-open'):!document.body.classList.contains('sidebar-hidden');$('#toggleSidebar').setAttribute('aria-expanded',String(visible));$('#toggleSidebar').setAttribute('aria-pressed',String(visible))}
+function setSidebarOpen(open){const sidebar=$('#sidebar'),mobile=mobileSidebarEnabled();document.body.classList.toggle('sidebar-hidden',!mobile&&!open);sidebar.classList.toggle('mobile-open',mobile&&open);const visible=mobile?sidebar.classList.contains('mobile-open'):!document.body.classList.contains('sidebar-hidden');$('#toggleSidebar').setAttribute('aria-expanded',String(visible));$('#toggleSidebar').setAttribute('aria-pressed',String(visible));panelResize.refresh()}
 function syncSidebarLayout(){const mobile=mobileSidebarEnabled();if(mobile===sidebarLayoutMobile)return;sidebarLayoutMobile=mobile;setSidebarOpen(!mobile)}
-function setBrowserStatus(text,tone='ready'){const status=$('#browserStatus');status.dataset.tone=tone;$('#browserStatusText').textContent=text}
-function updateBrowserControls(){const current=browserState.history[browserState.index]||'';$('#browserBack').disabled=browserState.index<=0;$('#browserForward').disabled=browserState.index<0||browserState.index>=browserState.history.length-1;$('#browserRefresh').disabled=!current;for(const link of [$('#browserOpenExternal'),$('#browserNoticeExternal')]){link.hidden=!current;if(current)link.href=current}}
-function showBrowserNotice(title,description){$('#browserNoticeTitle').textContent=title;$('#browserNoticeDescription').textContent=description;$('#browserNotice').hidden=false;$('#browserLoading').hidden=true;$('#browserFrameShell').setAttribute('aria-busy','false');setBrowserStatus(title,'error')}
-function finishBrowserLoad(requestId){if(requestId!==browserState.loadRequest)return;clearTimeout(browserState.loadTimer);$('#browserLoading').hidden=true;$('#browserNotice').hidden=true;$('#browserFrameShell').setAttribute('aria-busy','false');setBrowserStatus('Loaded. If the page is blank, the site may block embedding.','loaded')}
-function navigateBrowser(value,{push=true}={}){const result=normalizeBrowserUrl(value);if(result.error){showBrowserNotice('Invalid address',result.error);$('#browserUrl').setAttribute('aria-invalid','true');return false}const url=result.url;$('#browserUrl').removeAttribute('aria-invalid');$('#browserUrl').value=url;if(push&&browserState.history[browserState.index]!==url){browserState.history=browserState.history.slice(0,browserState.index+1);browserState.history.push(url);browserState.index=browserState.history.length-1}const requestId=++browserState.loadRequest,frame=$('#browserFrame');clearTimeout(browserState.loadTimer);$('#browserEmpty').hidden=true;$('#browserNotice').hidden=true;$('#browserLoading').hidden=false;frame.hidden=false;frame.setAttribute('sandbox',browserSandboxFor(url,location.href));$('#browserFrameShell').setAttribute('aria-busy','true');setBrowserStatus('Loading page...','loading');updateBrowserControls();frame.onload=()=>finishBrowserLoad(requestId);frame.onerror=()=>requestId===browserState.loadRequest&&showBrowserNotice('Page could not be loaded','The site did not complete the embedded request. Open it externally to continue.');frame.src=url;browserState.loadTimer=setTimeout(()=>{if(requestId===browserState.loadRequest)showBrowserNotice('Page may have blocked embedding','This site did not finish loading in the panel. It may block embedded browsers; you can open it externally instead.')},10000);return true}
-function moveBrowserHistory(delta){const next=browserState.index+delta;if(next<0||next>=browserState.history.length)return;browserState.index=next;navigateBrowser(browserState.history[next],{push:false});updateBrowserControls()}
-function openBrowserPanel(){const tab=$('#utilityTab');tab.textContent='Browser';tab.dataset.sidePanelTab='browser';tab.hidden=false;setSidePanelOpen(true,false);setSidePanelView('browser','Browser');updateBrowserControls();if(browserState.index<0&&!overlayPanelsEnabled())requestAnimationFrame(()=>$('#browserUrl').focus())}
-function setSidePanelView(view,title){const launcher=view==='launcher',review=view==='review',utility=view==='utility',browser=view==='browser',terminal=view==='terminal',sideTask=view==='side-task';$('#sidePanelLauncher').hidden=!launcher;$('#reviewPanelContent').hidden=!review;$('#browserPanel').hidden=!browser;$('#sideTerminalPanel').hidden=!terminal;$('#sideTaskPanel').hidden=!sideTask;$('#utilityPanelContent').hidden=!utility;for(const tab of document.querySelectorAll('.side-panel-tab')){const selected=tab.dataset.sidePanelTab===view;tab.classList.toggle('active',selected);tab.setAttribute('aria-selected',String(selected))}$('#newTab').hidden=false;if(review)$('#reviewTab').hidden=false;if(utility||browser||terminal||sideTask)$('#utilityTab').hidden=false;$('#sidePanelTitle').textContent=title||(launcher?'New tab':review?'Review':$('#utilityTab').textContent);renderChanges();if(terminal)requestAnimationFrame(()=>{initializeTerminal(terminalStates.side);fitTerminal(terminalStates.side);terminalStates.side.term?.focus()});if(sideTask)renderSideTasks();if(overlayPanelsEnabled()&&document.body.classList.contains('side-panel-open'))requestAnimationFrame(()=>$('#closeSidePanel').focus())}
-function openReviewPanel(review=null){state.activeReview=review||[...state.turnDiffs.values()].at(-1)||state.activeReview;setSidePanelOpen(true,false);setSidePanelView('review','Review')}
-function openUtilityPanel(kind){if(kind==='browser'){openBrowserPanel();return}const tab=$('#utilityTab');if(kind==='terminal'){tab.textContent='Terminal';tab.dataset.sidePanelTab='terminal';setSidePanelOpen(true,false);setSidePanelView('terminal','Terminal');return}if(kind==='side-task'){tab.textContent='Side tasks';tab.dataset.sidePanelTab='side-task';setSidePanelOpen(true,false);setSidePanelView('side-task','Side tasks');return}const labels={files:['Files','folderOpen','Choose or switch the local project folder available to this WebUI.']},entry=labels[kind];if(!entry)return;const[title,icon,description]=entry;tab.textContent=title;tab.dataset.sidePanelTab='utility';$('#utilityPanelTitle').textContent=title;$('#utilityPanelDescription').textContent=description;$('#utilityPanelIcon').innerHTML=codexIcon(icon);const action=$('#utilityPanelAction');action.hidden=false;action.textContent='Choose project folder';action.onclick=openFolderPicker;setSidePanelOpen(true,false);setSidePanelView('utility',title)}
-function setSidePanelOpen(open,reset=true){const panel=$('#sidePanel'),trigger=$('#toggleSidePanel'),wasOpen=!panel.hidden;if(open){setSummaryPanelOpen(false);if(!wasOpen){sidePanelReturnFocus=document.activeElement instanceof HTMLElement?document.activeElement:trigger;panel.hidden=false;document.body.classList.add('side-panel-open');trigger.setAttribute('aria-pressed','true');trigger.setAttribute('aria-expanded','true')}if(reset)setSidePanelView('launcher','New tab');if(!wasOpen)focusPanel(panel,$('#closeSidePanel'))}else{panel.hidden=true;document.body.classList.remove('side-panel-open','review-split-open');trigger.setAttribute('aria-pressed','false');trigger.setAttribute('aria-expanded','false');restorePanelFocus(panel,sidePanelReturnFocus);sidePanelReturnFocus=null}}
-function setSummaryPanelOpen(open){const panel=$('#summaryPanel'),trigger=$('#toggleSummaryPanel');if(open){setSidePanelOpen(false,false);summaryPanelReturnFocus=document.activeElement instanceof HTMLElement?document.activeElement:trigger;panel.hidden=false;document.body.classList.add('summary-panel-open');trigger.setAttribute('aria-pressed','true');trigger.setAttribute('aria-expanded','true');syncSummaryPanel();focusPanel(panel,$('#closeSummaryPanel'))}else{panel.hidden=true;document.body.classList.remove('summary-panel-open');trigger.setAttribute('aria-pressed','false');trigger.setAttribute('aria-expanded','false');restorePanelFocus(panel,summaryPanelReturnFocus);summaryPanelReturnFocus=null}}
+function prepareSideBrowser(entry){
+  const panel=browserTemplate.cloneNode(true),suffix=++sideBrowserSequence===1?'':`-${entry.id}`,ids=new Map();
+  for(const node of [panel,...panel.querySelectorAll('[id]')]){const id=node.id;if(!id)continue;ids.set(id,id+suffix);node.dataset.browserControl=id;node.id=id+suffix}
+  for(const node of panel.querySelectorAll('[for],[aria-describedby]'))for(const attr of ['for','aria-describedby'])if(node.hasAttribute(attr))node.setAttribute(attr,node.getAttribute(attr).split(' ').map(id=>ids.get(id)||id).join(' '));
+  $('#sideTerminalPanel').before(panel);entry.panel=panel;entry.browser=createBrowserView(panel,{t});
+}
+function currentFileCwd(){return state.active?state.active.cwd||null:state.workspaceSelected&&!state.projectless?state.workspaceContext?.cwd||null:null}
+function syncFileBrowsers(){for(const entry of sideTabs.values())entry.files?.setCwd(currentFileCwd())}
+function syncFileBrowserVisibility(){for(const entry of sideTabs.values())entry.files?.setVisible(!$('#sidePanel').hidden&&!entry.panel.hidden)}
+function syncSidePanelLauncher(){for(const kind of ['files','side-task','side-chat'])$(`[data-side-panel-action="${kind}"]`).hidden=sideTabs.values().some(entry=>entry.kind===kind)}
+function prepareSideFiles(entry){
+  const panel=document.createElement('section');panel.id=`files-panel-${entry.id}`;panel.hidden=true;panel.setAttribute('role','tabpanel');
+  $('#sideTerminalPanel').before(panel);entry.panel=panel;entry.files=createFileBrowser({panel,getCwd:currentFileCwd,t});
+}
+function prepareSideChat(entry){
+  const panel=document.createElement('section');panel.id=`chat-panel-${entry.id}`;panel.hidden=true;panel.setAttribute('role','tabpanel');$('#sideTerminalPanel').before(panel);entry.panel=panel;
+  const context={parentThreadId:state.active?.id||null,title:state.active?titleOf(state.active):t('New chat'),cwd:currentTerminalCwd(),model:state.selectedModel,effort:$('#effortSelect').value};
+  entry.sideChat=createSideChat({panel,rpc,context,alignWith:{composer:$('#composer'),dock:$('.composer-dock')},t,onClose:()=>void sideTabs.remove(entry.id)});
+}
+async function confirmSideChatClose(entry){
+  if(!entry.sideChat)return true;
+  const confirmed=await confirmAction({title:t('Close side chat?'),message:t('This deletes this temporary conversation and stops any work running in it. The main chat is kept.'),confirmLabel:t('Close and delete')});
+  if(!confirmed)return false;
+  try{await entry.sideChat.close();return true}catch(error){toast(error.message,5200);return false}
+}
+async function closeVisibleSidePanel(){
+  const entry=sideTabs.active;
+  if(entry?.kind==='side-chat'&&!await sideTabs.remove(entry.id))return;
+  setSidePanelOpen(false);
+}
+async function openSideChat(prompt=''){
+  setSidePanelOpen(true,false);const entry=sideTabs.open('side-chat');entry.sideChat.focus(prompt);return entry;
+}
+function showSidePanelEntry(entry,previous){
+  syncSidePanelLauncher();
+  if(previous&&previous!==entry&&previous.kind==='side-task'){previous.previewThread=subagentPreview.selected;previous.previewOwner=state.active?.id}
+  const kind=entry.kind;
+  if(kind==='browser'&&!entry.browser)prepareSideBrowser(entry);
+  if(kind==='files'&&!entry.files)prepareSideFiles(entry);
+  if(kind==='side-chat'&&!entry.sideChat)prepareSideChat(entry);
+  if(kind==='terminal'&&!entry.terminal){const host=sideTerminalTemplate.cloneNode();host.id=++sideTerminalSequence===1?'sideTerminalHost':`sideTerminalHost-${entry.id}`;$('#sideTerminalPanel').append(host);entry.host=host;entry.terminal=createTerminalState(host.id,'sidePanel');entry.terminal.cwd=currentTerminalCwd()}
+  $('#sidePanelLauncher').hidden=kind!=='launcher';$('#reviewPanelContent').hidden=kind!=='review';$('#sideTerminalPanel').hidden=kind!=='terminal';$('#sideTaskPanel').hidden=kind!=='side-task';
+  for(const panel of document.querySelectorAll('#sidePanel>.side-panel-browser'))panel.hidden=panel!==entry.panel;
+  for(const panel of document.querySelectorAll('#sidePanel>.side-panel-files'))panel.hidden=panel!==entry.panel;
+  for(const tab of sideTabs.values())if(tab.kind==='side-chat')tab.panel.hidden=tab!==entry;
+  syncFileBrowserVisibility();
+  for(const tab of sideTabs.values())if(tab.host)tab.host.hidden=tab!==entry;
+  const content=kind==='browser'||kind==='files'||kind==='side-chat'?entry.panel:kind==='terminal'?$('#sideTerminalPanel'):kind==='review'?$('#reviewPanelContent'):kind==='side-task'?$('#sideTaskPanel'):$('#sidePanelLauncher');
+  content.setAttribute('aria-labelledby',entry.id);entry.button.setAttribute('aria-controls',content.id);
+  $('#sidePanelTitle').textContent=entry.button.textContent;
+  if(kind==='files')entry.files.setCwd(currentFileCwd());
+  if(kind==='side-chat')entry.sideChat.focus();
+  if(kind==='terminal'){terminalStates.side=entry.terminal;initializeTerminal(entry.terminal);requestAnimationFrame(()=>{fitTerminal(entry.terminal);if(terminalIsVisible(entry.terminal))entry.terminal.term?.focus()})}
+  if(kind==='side-task'){
+    if(previous!==entry){subagentPreview.close();if(entry.previewThread&&entry.previewOwner===state.active?.id)subagentPreview.open(entry.previewThread)}
+    renderSideTasks();void subagentPreview.refresh();
+  }else subagentPreview.suspend();
+  renderChanges();renderPendingApprovals();panelResize.refresh();
+  if(overlayPanelsEnabled()&&document.body.classList.contains('side-panel-open'))requestAnimationFrame(()=>$('#closeSidePanel').focus());
+}
+function openReviewPanel(review=null){if(review){state.activeReview=review;reviewPinnedTurn=review.turnId}else if(!state.activeReview)state.activeReview=[...state.turnDiffs.values()].at(-1)||null;setSidePanelOpen(true,false);sideTabs.open('review')}
+function openUtilityPanel(kind){setSidePanelOpen(true,false);sideTabs.open(kind)}
+function setSidePanelOpen(open,reset=true){const panel=$('#sidePanel'),trigger=$('#toggleSidePanel'),wasOpen=!panel.hidden;if(open){setSummaryPanelOpen(false);if(!wasOpen){sidePanelReturnFocus=document.activeElement instanceof HTMLElement?document.activeElement:trigger;panel.hidden=false;document.body.classList.add('side-panel-open');trigger.setAttribute('aria-pressed','true');trigger.setAttribute('aria-expanded','true')}if(reset)sideTabs.launcher();if(!wasOpen)focusPanel(panel,$('#closeSidePanel'))}else{subagentPreview.suspend();panel.hidden=true;document.body.classList.remove('side-panel-open','review-split-open');trigger.setAttribute('aria-pressed','false');trigger.setAttribute('aria-expanded','false');restorePanelFocus(panel,sidePanelReturnFocus);sidePanelReturnFocus=null}syncFileBrowserVisibility()}
+function setSummaryPanelOpen(open){const panel=$('#summaryPanel'),trigger=$('#toggleSummaryPanel');if(open){setSidePanelOpen(false,false);summaryPanelReturnFocus=trigger;panel.hidden=false;document.body.classList.add('summary-panel-open');trigger.setAttribute('aria-pressed','true');trigger.setAttribute('aria-expanded','true');syncSummaryPanel();focusPanel(panel,$('#closeSummaryPanel'))}else{panel.hidden=true;document.body.classList.remove('summary-panel-open');trigger.setAttribute('aria-pressed','false');trigger.setAttribute('aria-expanded','false');restorePanelFocus(panel,summaryPanelReturnFocus);summaryPanelReturnFocus=null}panelResize.refresh()}
 function closeImageViewer(){const dialog=$('#imageViewer');if(dialog.open)dialog.close()}
 function openImageViewer(source,title='Image',path=''){const dialog=$('#imageViewer'),image=$('#imageViewerImage');imageViewerReturnFocus=document.activeElement instanceof HTMLElement?document.activeElement:null;$('#imageViewerTitle').textContent=title||'Image';$('#imageViewerPath').textContent=path||title||'';$('#imageViewerError').hidden=true;image.hidden=false;image.alt=title||'';image.src=source;$('#imageViewerOriginal').href=source;if(!dialog.open)dialog.showModal();requestAnimationFrame(()=>$('#closeImageViewer').focus())}
 function currentTerminalCwd(){return state.active?.cwd||state.workspaceContext?.cwd||state.config.home||'.'}
-function terminalIsVisible(terminalState){const host=$(`#${terminalState.hostId}`),panel=$(`#${terminalState.panelId}`);return host&&!host.hidden&&panel&&!panel.hidden}
-function fitTerminal(terminalState){const host=$(`#${terminalState.hostId}`);if(!terminalState.fit||!terminalIsVisible(terminalState)||host.clientWidth<1||host.clientHeight<1)return;try{terminalState.fit.fit()}catch{}}
+function terminalIsVisible(terminalState){if(!terminalState||terminalState.closed)return false;const host=$(`#${terminalState.hostId}`),panel=$(`#${terminalState.panelId}`);return host&&!host.hidden&&panel&&!panel.hidden}
+function fitTerminal(terminalState){if(!terminalState||terminalState.closed)return;const host=$(`#${terminalState.hostId}`);if(!terminalState.fit||!terminalIsVisible(terminalState)||host.clientWidth<1||host.clientHeight<1)return;try{terminalState.fit.fit()}catch{}}
 function sendTerminalResize(terminalState){const ws=terminalState.ws,term=terminalState.term;if(ws?.readyState===WebSocket.OPEN&&term)ws.send(JSON.stringify({type:'resize',cols:term.cols,rows:term.rows}))}
-function connectTerminal(terminalState){if(terminalState.ws&&[WebSocket.OPEN,WebSocket.CONNECTING].includes(terminalState.ws.readyState))return;clearTimeout(terminalState.reconnectTimer);const proto=location.protocol==='https:'?'wss:':'ws:',host=$(`#${terminalState.hostId}`),ws=new WebSocket(`${proto}//${location.host}/terminal?cwd=${encodeURIComponent(currentTerminalCwd())}`);terminalState.ws=ws;ws.binaryType='arraybuffer';host.dataset.connected='false';ws.onopen=()=>{host.dataset.connected='true';requestAnimationFrame(()=>{fitTerminal(terminalState);sendTerminalResize(terminalState);terminalState.term?.focus()})};ws.onmessage=async event=>{const data=event.data instanceof Blob?new Uint8Array(await event.data.arrayBuffer()):event.data instanceof ArrayBuffer?new Uint8Array(event.data):String(event.data);terminalState.term?.write(data)};ws.onerror=()=>ws.close();ws.onclose=()=>{host.dataset.connected='false';if(terminalState.ws===ws)terminalState.ws=null;if(terminalIsVisible(terminalState))terminalState.reconnectTimer=setTimeout(()=>connectTerminal(terminalState),1000)}}
-function initializeTerminal(terminalState){if(terminalState.term){connectTerminal(terminalState);requestAnimationFrame(()=>fitTerminal(terminalState));return}const dark=matchMedia('(prefers-color-scheme:dark)').matches,host=$(`#${terminalState.hostId}`),term=new Terminal({cursorBlink:true,cursorStyle:'block',fontFamily:'ui-monospace, "SFMono-Regular", "SF Mono", Menlo, Consolas, monospace',fontSize:12,lineHeight:1.2,scrollback:5000,theme:dark?{background:'#181818',foreground:'#f2f2f2',cursor:'#f2f2f2',selectionBackground:'#3b4a5a'}:{background:'#ffffff',foreground:'#0d0d0d',cursor:'#0d0d0d',selectionBackground:'#c8dcf4'}}),fit=new FitAddon;term.loadAddon(fit);term.open(host);terminalState.term=term;terminalState.fit=fit;term.onData(data=>{const ws=terminalState.ws;if(ws?.readyState===WebSocket.OPEN)ws.send(new TextEncoder().encode(data))});term.onResize(()=>sendTerminalResize(terminalState));terminalState.resizeObserver=new ResizeObserver(()=>requestAnimationFrame(()=>fitTerminal(terminalState)));terminalState.resizeObserver.observe(host);connectTerminal(terminalState);globalThis.__codexTerminals=terminalStates;if(terminalState===terminalStates.bottom)globalThis.__codexTerminal={term,fit,state:terminalState}}
-function setBottomPanelView(kind='launcher'){const launcher=kind==='launcher',terminal=kind==='terminal',labels={browser:['Browser','globe','Open Browser from the right panel to keep it beside the chat.'],files:['Files','folderOpen','Choose or switch the local project folder available to this WebUI.']};$('#bottomPanelLauncher').hidden=!launcher;$('#terminalHost').hidden=!terminal;$('#bottomPanelUtility').hidden=launcher||terminal;$('#bottomPanelTab').textContent=launcher?'New tab':terminal?'Terminal':labels[kind]?.[0]||'New tab';if(launcher)return;bottomPanelLastView=kind;if(terminal){initializeTerminal(terminalStates.bottom);requestAnimationFrame(()=>{fitTerminal(terminalStates.bottom);terminalStates.bottom.term?.focus()});return}const[title,icon,description]=labels[kind];$('#bottomPanelIcon').innerHTML=codexIcon(icon);$('#bottomPanelUtilityTitle').textContent=title;$('#bottomPanelDescription').textContent=description;const action=$('#bottomPanelAction');action.hidden=kind!=='files';action.textContent='Choose project folder';action.onclick=kind==='files'?openFolderPicker:null}
-function setBottomPanelOpen(open){const panel=$('#bottomPanel');panel.hidden=!open;document.body.classList.toggle('bottom-panel-open',open);$('#toggleBottomPanel').setAttribute('aria-pressed',String(open));$('#toggleBottomPanel').setAttribute('aria-expanded',String(open));if(open)setBottomPanelView(bottomPanelLastView||'launcher')}
+function connectTerminal(terminalState){if(terminalState.closed||terminalState.exited)return;if(terminalState.ws&&[WebSocket.OPEN,WebSocket.CONNECTING].includes(terminalState.ws.readyState))return;clearTimeout(terminalState.reconnectTimer);const proto=location.protocol==='https:'?'wss:':'ws:',host=$(`#${terminalState.hostId}`),ws=new WebSocket(`${proto}//${location.host}/terminal?cwd=${encodeURIComponent(terminalState.cwd||currentTerminalCwd())}`);terminalState.ws=ws;ws.binaryType='arraybuffer';host.dataset.connected='false';ws.onopen=()=>{host.dataset.connected='true';requestAnimationFrame(()=>{fitTerminal(terminalState);sendTerminalResize(terminalState);if(terminalIsVisible(terminalState))terminalState.term?.focus()})};ws.onmessage=async event=>{const data=event.data instanceof Blob?new Uint8Array(await event.data.arrayBuffer()):event.data instanceof ArrayBuffer?new Uint8Array(event.data):String(event.data);terminalState.term?.write(data)};ws.onerror=()=>ws.close();ws.onclose=event=>{host.dataset.connected='false';if(event.code===1000&&event.reason==='Terminal exited')terminalState.exited=true;if(terminalState.ws===ws)terminalState.ws=null;if(!terminalState.exited&&terminalIsVisible(terminalState))terminalState.reconnectTimer=setTimeout(()=>connectTerminal(terminalState),1000)}}
+function terminalTheme(){const style=getComputedStyle(document.documentElement),foreground=style.getPropertyValue('--app-text').trim();return{background:style.getPropertyValue('--app-main').trim(),foreground,cursor:foreground,selectionBackground:document.documentElement.dataset.theme==='dark'?'#3b4a5a':'#c8dcf4'}}
+function syncTerminalThemes(){for(const terminal of [...sideTabs.values().map(entry=>entry.terminal).filter(Boolean),...bottomTerminals.values()])if(terminal.term&&!terminal.closed)terminal.term.options.theme=terminalTheme()}
+function initializeTerminal(terminalState){if(terminalState.closed)return;terminalState.cwd??=currentTerminalCwd();if(terminalState.term){connectTerminal(terminalState);requestAnimationFrame(()=>fitTerminal(terminalState));return}const host=$(`#${terminalState.hostId}`),term=new Terminal({cursorBlink:true,cursorStyle:'block',fontFamily:'ui-monospace, "SFMono-Regular", "SF Mono", Menlo, Consolas, monospace',fontSize:12,lineHeight:1.2,scrollback:5000,theme:terminalTheme()}),fit=new FitAddon;term.loadAddon(fit);term.open(host);terminalState.term=term;terminalState.fit=fit;term.onData(data=>{const ws=terminalState.ws;if(ws?.readyState===WebSocket.OPEN)ws.send(new TextEncoder().encode(data))});term.onResize(()=>sendTerminalResize(terminalState));terminalState.resizeObserver=new ResizeObserver(()=>requestAnimationFrame(()=>fitTerminal(terminalState)));terminalState.resizeObserver.observe(host);connectTerminal(terminalState);globalThis.__codexTerminals=terminalStates;if(terminalState===terminalStates.bottom)globalThis.__codexTerminal={term,fit,state:terminalState}}
+function disposeTerminal(terminalState){
+  terminalState.closed=true;clearTimeout(terminalState.reconnectTimer);terminalState.resizeObserver?.disconnect();
+  if(terminalState.ws){terminalState.ws.onopen=terminalState.ws.onmessage=terminalState.ws.onclose=terminalState.ws.onerror=null;terminalState.ws.close();terminalState.ws=null}
+  terminalState.term?.dispose();terminalState.term=null;terminalState.fit=null;
+}
+function setBottomPanelOpen(open){const panel=$('#bottomPanel');panel.hidden=!open;document.body.classList.toggle('bottom-panel-open',open);$('#toggleBottomPanel').setAttribute('aria-pressed',String(open));$('#toggleBottomPanel').setAttribute('aria-expanded',String(open));if(open)bottomTerminals.open()}
 function setSidebarSearchOpen(open){const panel=$('#sidebarSearchPanel'),input=$('#threadSearch');panel.hidden=!open;$('#sidebarSearchButton').setAttribute('aria-expanded',String(open));if(open){requestAnimationFrame(()=>input.focus());return}if(input.value){input.value='';renderThreads()}}
 function setSidebarHelpOpen(open){$('#sidebarHelpMenu').hidden=!open;$('#sidebarHelpButton').setAttribute('aria-expanded',String(open))}
 
-$('#newTab').onclick=()=>setSidePanelView('launcher','New tab');$('#reviewTab').onclick=()=>openReviewPanel(state.activeReview);$('#utilityTab').onclick=()=>setSidePanelView($('#utilityTab').dataset.sidePanelTab,$('#utilityTab').textContent);$('#openSidePanelTab').onclick=()=>setSidePanelView('launcher','New tab');for(const action of document.querySelectorAll('[data-side-panel-action]'))action.onclick=()=>action.dataset.sidePanelAction==='review'?openReviewPanel():openUtilityPanel(action.dataset.sidePanelAction);$('#browserAddressForm').onsubmit=event=>{event.preventDefault();navigateBrowser($('#browserUrl').value)};$('#browserBack').onclick=()=>moveBrowserHistory(-1);$('#browserForward').onclick=()=>moveBrowserHistory(1);$('#browserRefresh').onclick=()=>browserState.index>=0&&navigateBrowser(browserState.history[browserState.index],{push:false});$('#bottomPanelTab').onclick=()=>setBottomPanelView();for(const action of document.querySelectorAll('[data-bottom-panel-action]'))action.onclick=()=>setBottomPanelView(action.dataset.bottomPanelAction);$('#reviewMode').onclick=()=>{reviewPreferences.mode=reviewPreferences.mode==='unified'?'split':'unified';saveReviewPreferences();renderChanges()};$('#reviewWrap').onclick=()=>{reviewPreferences.wrap=!reviewPreferences.wrap;saveReviewPreferences();renderChanges()};$('#reviewExpand').onclick=()=>{reviewPreferences.expanded=!reviewPreferences.expanded;saveReviewPreferences();renderChanges()};$('#reviewPatch').onclick=applyActiveReviewPatch;$('#composer').addEventListener('submit',submitPrompt);$('#prompt').addEventListener('input',handlePromptInput);$('#prompt').addEventListener('keydown',handlePromptKeydown);$('#threadSearch').addEventListener('input',renderThreads);$('#modelButton').addEventListener('click',toggleModelMenu);$('#modeButton').onclick=togglePermissionMenu;$('#confirmFullAccess').onclick=()=>{const action=pendingFullAccessAction;$('#fullAccessDialog').close();if(action==='enable')setPermissionVisibility('fullAccess',true);else setPermissionMode('full-access');pendingFullAccessAction='select'};$('#fullAccessDialog').addEventListener('close',()=>{pendingFullAccessAction='select';syncPermissionSettings()});document.querySelector('[data-composer-control="dictation"]').onclick=()=>toast('Dictation requires the native desktop audio bridge.');$('#newTask').onclick=startNewTask;$('#projectButton').onclick=openFolderPicker;$('#newProjectButton').onclick=openFolderPicker;$('#composerProjectButton').onclick=openFolderPicker;$('#projectlessOption').onclick=useProjectless;$('#accountButton').onclick=e=>{e.stopPropagation();if(state.account?.type==='chatgpt')toggleAccountMenu();else openSettings('general')};$('#folderGo').onclick=()=>loadFolders($('#folderPathInput').value);$('#folderPathInput').onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();loadFolders(e.currentTarget.value)}};$('#folderUp').onclick=()=>folderBrowse.parent&&loadFolders(folderBrowse.parent);$('#folderConfirm').onclick=useSelectedFolder;$('#toggleSummaryPanel').onclick=()=>setSummaryPanelOpen($('#summaryPanel').hidden);$('#closeImageViewer').onclick=closeImageViewer;$('#imageViewerImage').onload=()=>{$('#imageViewerImage').hidden=false;$('#imageViewerError').hidden=true};$('#imageViewerImage').onerror=()=>{$('#imageViewerImage').hidden=true;$('#imageViewerError').hidden=false};$('#imageViewer').addEventListener('click',event=>{if(event.target===event.currentTarget)closeImageViewer()});$('#imageViewer').addEventListener('close',()=>{const image=$('#imageViewerImage');image.removeAttribute('src');if(imageViewerReturnFocus?.isConnected)imageViewerReturnFocus.focus();imageViewerReturnFocus=null});function mobileSidebarEnabled(){return document.documentElement.classList.contains('mobile-device')||innerWidth<720}
+$('#openSidePanelTab').onclick=()=>sideTabs.launcher();for(const action of document.querySelectorAll('[data-side-panel-action]'))action.onclick=()=>sideTabs.choose(action.dataset.sidePanelAction);$('#newBottomTerminal').onclick=()=>bottomTerminals.add();$('#reviewMode').onclick=()=>{reviewPreferences.mode=reviewPreferences.mode==='unified'?'split':'unified';saveReviewPreferences();renderChanges()};$('#reviewWrap').onclick=()=>{reviewPreferences.wrap=!reviewPreferences.wrap;saveReviewPreferences();renderChanges()};$('#reviewExpand').onclick=()=>{reviewPreferences.expanded=!reviewPreferences.expanded;reviewRenderer.expandAll();saveReviewPreferences();renderChanges()};$('#reviewTurnSelect').onchange=event=>{const review=state.turnDiffs.get(event.target.value);if(review){state.activeReview=review;reviewPinnedTurn=review.turnId===[...state.turnDiffs.keys()].at(-1)?null:review.turnId;renderChanges()}};$('#reviewPatch').onclick=applyActiveReviewPatch;$('#composer').addEventListener('submit',submitPrompt);$('#prompt').addEventListener('input',handlePromptInput);$('#prompt').addEventListener('keydown',handlePromptKeydown);$('#prompt').addEventListener('pointerdown',()=>promptHistory.reset());$('#retryThread').onclick=retryBlockedThread;$('#forkLockedThread').onclick=forkBlockedThread;$('#threadSearch').addEventListener('input',renderThreads);$('#modelButton').addEventListener('click',toggleModelMenu);$('#modeButton').onclick=togglePermissionMenu;$('#confirmFullAccess').onclick=()=>{const action=pendingFullAccessAction;$('#fullAccessDialog').close();if(action==='enable')setPermissionVisibility('fullAccess',true);else setPermissionMode('full-access');pendingFullAccessAction='select'};$('#fullAccessDialog').addEventListener('close',()=>{pendingFullAccessAction='select';syncPermissionSettings()});document.querySelector('[data-composer-control="dictation"]').onclick=()=>toast('Dictation requires the native desktop audio bridge.');$('#newTask').onclick=startNewTask;$('#projectButton').onclick=openFolderPicker;$('#newProjectButton').onclick=openFolderPicker;$('#composerProjectButton').onclick=openFolderPicker;$('#projectlessOption').onclick=useProjectless;$('#accountButton').onclick=e=>{e.stopPropagation();if(state.account?.type==='chatgpt')toggleAccountMenu();else openSettings('general')};$('#folderGo').onclick=()=>loadFolders($('#folderPathInput').value);$('#folderPathInput').onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();loadFolders(e.currentTarget.value)}};$('#folderUp').onclick=()=>folderBrowse.parent&&loadFolders(folderBrowse.parent);$('#folderConfirm').onclick=useSelectedFolder;$('#toggleSummaryPanel').onclick=()=>setSummaryPanelOpen($('#summaryPanel').hidden);$('#closeImageViewer').onclick=closeImageViewer;$('#imageViewerImage').onload=()=>{$('#imageViewerImage').hidden=false;$('#imageViewerError').hidden=true};$('#imageViewerImage').onerror=()=>{$('#imageViewerImage').hidden=true;$('#imageViewerError').hidden=false};$('#imageViewer').addEventListener('click',event=>{if(event.target===event.currentTarget)closeImageViewer()});$('#imageViewer').addEventListener('close',()=>{const image=$('#imageViewerImage');image.removeAttribute('src');if(imageViewerReturnFocus?.isConnected)imageViewerReturnFocus.focus();imageViewerReturnFocus=null});function mobileSidebarEnabled(){return document.documentElement.classList.contains('mobile-device')||innerWidth<720}
 $('#sidebarSearchButton').onclick=event=>{event.stopPropagation();setSidebarSearchOpen($('#sidebarSearchPanel').hidden)};$('#sidebarSearchClose').onclick=()=>setSidebarSearchOpen(false);$('#sidebarHelpButton').onclick=event=>{event.stopPropagation();setSidebarHelpOpen($('#sidebarHelpMenu').hidden)};$('#sidebarHelpSettings').onclick=()=>{setSidebarHelpOpen(false);openSettings('general-settings')};$('#sidebarHelpShortcuts').onclick=()=>{setSidebarHelpOpen(false);openSettings('keyboard-shortcuts')};$('#accountSettings').onclick=()=>openSettings('general-settings');$('#accountProfile').onclick=()=>openSettings('profile');$('#accountUsage').onclick=()=>openSettings('profile');$('#accountShortcuts').onclick=()=>openSettings('keyboard-shortcuts');for(const button of document.querySelectorAll('[data-settings-page]'))button.onclick=()=>setSettingsPage(button.dataset.settingsPage);$('#settingsAutoReviewToggle').onchange=event=>setPermissionVisibility('autoReview',event.currentTarget.checked);$('#settingsTaskNotifyToggle').onchange=event=>setTaskNotifyEnabled(event.currentTarget.checked);$('#settingsFullAccessToggle').onchange=event=>{if(!event.currentTarget.checked){setPermissionVisibility('fullAccess',false);return}event.currentTarget.checked=false;pendingFullAccessAction='enable';const dialog=$('#fullAccessDialog');if(!dialog.open)dialog.showModal()};$('#accountLogout').onclick=async()=>{if(!confirm('Log out?'))return;try{await rpc('account/logout');toggleAccountMenu(false);await loadAccount(true)}catch(error){toast(error.message)}};$('#settingsDialog').addEventListener('cancel',event=>{event.preventDefault();closeSettings()});
 $('#languageSelect').value=i18n.preference;
 $('#languageSelect').onchange=event=>i18n.setPreference(event.currentTarget.value);
 function refreshLocalizedRuntime(){
+  themeControls.render();
   $('#languageSelect').value=i18n.preference;
   if(!state.active)$('#threadTitle').textContent=t('New task');
   if(!folderBrowse.selected)$('#folderSelection').textContent=t('No folder selected');
   if(state.account)renderAccount(state.account);else for(const id of ['accountName','accountMenuName','settingsAccountName'])$(`#${id}`).textContent=t('Settings');
   goalControls?.render();if(threadControls)renderThreads();syncPermissionControl();syncModelLabel();refreshComposerPlaceholder();renderContextUsage();renderChanges();
-  syncComposerSubmitState();
+  syncComposerSubmitState();renderSideTasks();subagentPreview.localize();bottomTerminals.localize();sideTabs.localize();for(const entry of sideTabs.values()){entry.files?.localize();entry.sideChat?.localize()}
   if(!$('#modelMenu').hidden)renderModelMenuMain();
   if($('#settingsDialog').open){const current=document.querySelector('[data-settings-page].active')?.dataset.settingsPage||settingsRoutePage()||'general-settings';setSettingsPage(current,{updateRoute:false});filterSettingsNavigation($('#settingsSearch').value)}
 }
-threadControls=createThreadControls({rpc,translate:t,titleOf,shortPath,formatTime:formatThreadTime,getActiveId:()=>state.active?.id,onOpen:id=>{projectControls?.closeMenu(false);if(mobileSidebarEnabled())setSidebarOpen(false);void openThread(id)},onUpdate:updateThreadMetadata,onRemove:removeThreadFromSidebar,onRestore:restoreThreadToProject,onRender:renderThreads,toast});
-projectControls=createProjectControls({rpc,translate:t,projectKeyFor:sidebarProjectKey,projectName:sidebarProjectName,getThreads:()=>state.threads,onNew:projectKey=>{startNewTask({projectKey});if(mobileSidebarEnabled())setSidebarOpen(false)},onRemove:removeThreadFromSidebar,onRefresh:refresh=>{renderThreads();if(refresh){void refreshThreadList();threadControls.connected()}},onProjectEmpty:key=>{if(!state.active&&currentSidebarProjectKey()===key)startNewTask()},closeThreadMenu:()=>threadControls.closeMenu(false),toast});
+const themeControls=createThemeController({button:$('#toggleTheme'),t,onChange:syncTerminalThemes});
+threadControls=createThreadControls({rpc,translate:t,confirmAction,titleOf,shortPath,formatTime:formatThreadTime,getActiveId:()=>state.active?.id,onOpen:id=>{projectControls?.closeMenu(false);if(mobileSidebarEnabled())setSidebarOpen(false);void openThread(id)},onUpdate:updateThreadMetadata,onRemove:removeThreadFromSidebar,onRestore:restoreThreadToProject,onRender:renderThreads,toast});
+projectControls=createProjectControls({rpc,translate:t,confirmAction,projectKeyFor:sidebarProjectKey,projectName:sidebarProjectName,getThreads:()=>state.threads,onNew:projectKey=>{startNewTask({projectKey});if(mobileSidebarEnabled())setSidebarOpen(false)},onRemove:removeThreadFromSidebar,onRefresh:refresh=>{renderThreads();if(refresh){void refreshThreadList();threadControls.connected()}},onProjectEmpty:key=>{if(!state.active&&currentSidebarProjectKey()===key)startNewTask()},closeThreadMenu:()=>threadControls.closeMenu(false),toast});
 goalControls=createGoalController({rpc,getThread:()=>state.active,ensureThread:ensureGoalThread,translate:t,onModeChange:active=>{state.goalMode=active;refreshComposerPlaceholder()}});
 i18n.subscribe(refreshLocalizedRuntime);
 refreshLocalizedRuntime();
-$('#closeSidebar').onclick=()=>setSidebarOpen(false);$('#toggleSidePanel').onclick=()=>setSidePanelOpen($('#sidePanel').hidden);$('#toggleBottomPanel').onclick=()=>setBottomPanelOpen($('#bottomPanel').hidden);$('#closeBottomPanel').onclick=()=>setBottomPanelOpen(false);$('#toggleSidebar').onclick=()=>setSidebarOpen(mobileSidebarEnabled()?!$('#sidebar').classList.contains('mobile-open'):document.body.classList.contains('sidebar-hidden'));$('#closeSidePanel').onclick=()=>setSidePanelOpen(false);$('#closeSummaryPanel').onclick=()=>setSummaryPanelOpen(false);document.addEventListener('click',e=>{const target=e.target instanceof Element?e.target:null,image=target?.closest('[data-image-src]');if(image){e.preventDefault();openImageViewer(image.dataset.imageSrc,image.dataset.imageTitle||image.querySelector('img')?.alt||'Image',image.dataset.imagePath||'');return}if(target?.closest('a[data-file-download]'))return;const citation=target?.closest('a[data-file-reference]');if(!citation)return;e.preventDefault();dispatchEvent(new CustomEvent('codex-webui:file-reference',{detail:{path:citation.dataset.fileReference,lineStart:Number(citation.dataset.fileLineStart)||null,lineEnd:Number(citation.dataset.fileLineEnd)||null}}))});document.addEventListener('click',e=>{const path=e.composedPath();closeApprovalMenus(path);if(!path.includes($('#modelPicker')))closeModelMenu();if(!path.includes($('#permissionPicker')))closePermissionMenu();if(!path.includes($('#accountMenu'))&&!path.includes($('#accountButton')))toggleAccountMenu(false);if(!path.includes($('#sidebarSearchPanel'))&&!path.includes($('#sidebarSearchButton')))setSidebarSearchOpen(false);if(!path.includes($('#sidebarHelpMenu'))&&!path.includes($('#sidebarHelpButton')))setSidebarHelpOpen(false)});document.addEventListener('visibilitychange',()=>{if(document.visibilityState!=='visible')return;scheduleThreadListRefresh(0);scheduleActiveThreadSync(0)});addEventListener('keydown',e=>{if(state.initializing)return;if(e.target instanceof Element&&e.target.closest('.terminal-host'))return;if(e.key==='Escape'){if(e.isComposing||e.keyCode===229||e.repeat)return;if($('#imageViewer').open){e.preventDefault();closeImageViewer();return}if($('#folderDialog').open||$('#fullAccessDialog').open||$('#goalDialog').open||threadControls?.isRenaming())return;if(threadControls?.hasOpenMenu()){e.preventDefault();threadControls.closeMenu();return;}if(projectControls?.hasOpenMenu()){e.preventDefault();projectControls.closeMenu();return;}if(e.defaultPrevented)return;if(!$('#sidebarSearchPanel').hidden){e.preventDefault();setSidebarSearchOpen(false);return}if(!$('#sidebarHelpMenu').hidden){e.preventDefault();setSidebarHelpOpen(false);return}if($('#settingsDialog').open){e.preventDefault();closeSettings();return}const menuOpen=!$('#modelMenu').hidden||!$('#permissionMenu').hidden||!$('#accountMenu').hidden||!$('#goalMenu').hidden||Boolean(document.querySelector('.approval-menu:not([hidden])'));closeModelMenu();closePermissionMenu();closeApprovalMenus();toggleAccountMenu(false);if(menuOpen)return;if(document.body.classList.contains('side-panel-open'))setSidePanelOpen(false);else if(document.body.classList.contains('summary-panel-open'))setSummaryPanelOpen(false);else if(activeTurnId()){e.preventDefault();void interruptForSteering()}}if((e.metaKey||e.ctrlKey)&&e.key==='k'){e.preventDefault();startNewTask()}if((e.metaKey||e.ctrlKey)&&e.key==='b'){e.preventDefault();$('#toggleSidebar').click()}if((e.metaKey||e.ctrlKey)&&e.key==='j'){e.preventDefault();$('#toggleBottomPanel').click()}});addEventListener('resize',()=>{syncOverlayPanelMode();syncSidebarLayout();for(const terminalState of Object.values(terminalStates))requestAnimationFrame(()=>fitTerminal(terminalState))});
-globalThis.__codexWebuiDebug={notify:onNotification,request:onServerRequest,state,browserState,navigateBrowser,renderChanges,renderAccount,renderHeader,refreshComposerPlaceholder,setProjectless,openImageViewer,openThread,loadInitial,startNewTask,setSidebarOpen,openSettings,closeSettings,settingsRoutePage,selectedPermission,permissionThreadPolicy,permissionTurnPolicy,setPermissionMode,setPermissionProfiles,setPermissionVisibility,renderPermissionMenu,filterAppModels,renderModels,syncTurnSnapshot,recordTurnReview,scrollOpenedThreadToBottom};
+$('#closeSidebar').onclick=()=>setSidebarOpen(false);$('#toggleSidePanel').onclick=()=>$('#sidePanel').hidden?setSidePanelOpen(true):void closeVisibleSidePanel();$('#toggleBottomPanel').onclick=()=>setBottomPanelOpen($('#bottomPanel').hidden);$('#closeBottomPanel').onclick=()=>setBottomPanelOpen(false);$('#toggleSidebar').onclick=()=>setSidebarOpen(mobileSidebarEnabled()?!$('#sidebar').classList.contains('mobile-open'):document.body.classList.contains('sidebar-hidden'));$('#closeSidePanel').onclick=()=>void closeVisibleSidePanel();$('#closeSummaryPanel').onclick=()=>setSummaryPanelOpen(false);document.addEventListener('click',e=>{const target=e.target instanceof Element?e.target:null,image=target?.closest('[data-image-src]');if(image){e.preventDefault();openImageViewer(image.dataset.imageSrc,image.dataset.imageTitle||image.querySelector('img')?.alt||'Image',image.dataset.imagePath||'');return}if(target?.closest('a[data-file-download]'))return;const citation=target?.closest('a[data-file-reference]');if(!citation)return;e.preventDefault();dispatchEvent(new CustomEvent('codex-webui:file-reference',{detail:{path:citation.dataset.fileReference,lineStart:Number(citation.dataset.fileLineStart)||null,lineEnd:Number(citation.dataset.fileLineEnd)||null}}))});document.addEventListener('click',e=>{const path=e.composedPath();closeApprovalMenus(path);if(!path.includes($('#modelPicker')))closeModelMenu();if(!path.includes($('#permissionPicker')))closePermissionMenu();if(!path.includes($('#accountMenu'))&&!path.includes($('#accountButton')))toggleAccountMenu(false);if(!path.includes($('#sidebarSearchPanel'))&&!path.includes($('#sidebarSearchButton')))setSidebarSearchOpen(false);if(!path.includes($('#sidebarHelpMenu'))&&!path.includes($('#sidebarHelpButton')))setSidebarHelpOpen(false)});document.addEventListener('visibilitychange',()=>{if(document.visibilityState!=='visible')return;scheduleThreadListRefresh(0);scheduleActiveThreadSync(0)});addEventListener('keydown',e=>{if(state.initializing)return;if(e.target instanceof Element&&e.target.closest('.terminal-host'))return;if(e.key==='Escape'){if(e.isComposing||e.keyCode===229||e.repeat)return;if($('#imageViewer').open){e.preventDefault();closeImageViewer();return}if(document.querySelector('dialog[open]'))return;if(threadControls?.hasOpenMenu()){e.preventDefault();threadControls.closeMenu();return;}if(projectControls?.hasOpenMenu()){e.preventDefault();projectControls.closeMenu();return;}if(e.defaultPrevented)return;if(!$('#sidebarSearchPanel').hidden){e.preventDefault();setSidebarSearchOpen(false);return}if(!$('#sidebarHelpMenu').hidden){e.preventDefault();setSidebarHelpOpen(false);return}if($('#settingsDialog').open){e.preventDefault();closeSettings();return}const menuOpen=!$('#modelMenu').hidden||!$('#permissionMenu').hidden||!$('#accountMenu').hidden||!$('#goalMenu').hidden||Boolean(document.querySelector('.approval-menu:not([hidden])'));closeModelMenu();closePermissionMenu();closeApprovalMenus();toggleAccountMenu(false);if(menuOpen)return;if(document.body.classList.contains('side-panel-open'))void closeVisibleSidePanel();else if(document.body.classList.contains('summary-panel-open'))setSummaryPanelOpen(false);else if(activeTurnId()&&!threadInputBlocked()){e.preventDefault();void interruptForSteering()}}if((e.metaKey||e.ctrlKey)&&e.key==='k'){e.preventDefault();startNewTask()}if((e.metaKey||e.ctrlKey)&&e.key==='b'){e.preventDefault();$('#toggleSidebar').click()}if((e.metaKey||e.ctrlKey)&&e.key==='j'){e.preventDefault();$('#toggleBottomPanel').click()}});addEventListener('resize',()=>{syncOverlayPanelMode();syncSidebarLayout();panelResize.refresh();for(const terminalState of [...sideTabs.values().map(tab=>tab.terminal).filter(Boolean),...bottomTerminals.values()])requestAnimationFrame(()=>fitTerminal(terminalState))});
+globalThis.__codexWebuiDebug={notify:onNotification,request:onServerRequest,state,sideTabs,get browserState(){return sideTabs.active?.browser?.state},navigateBrowser,renderChanges,renderAccount,renderHeader,refreshComposerPlaceholder,setProjectless,openImageViewer,openThread,loadInitial,startNewTask,setSidebarOpen,openSettings,closeSettings,settingsRoutePage,selectedPermission,permissionThreadPolicy,permissionTurnPolicy,setPermissionMode,setPermissionProfiles,setPermissionVisibility,renderPermissionMenu,filterAppModels,renderModels,syncTurnSnapshot,recordTurnReview,scrollOpenedThreadToBottom};
 async function boot(){syncSidebarLayout();syncPermissionControl();try{state.config=await fetch('/api/config').then(r=>r.json())}catch{}if(threadRouteId())clearWorkspaceSelection();else restoreDraftWorkspace();refreshComposerPlaceholder();connect()}
 composerAttachments=createAttachmentController({form:$('#composer'),prompt:$('#prompt'),picker:$('#attachmentPicker'),tray:$('#composerAttachmentTray'),button:document.querySelector('[data-composer-control="add"]'),translate:t,onChange:syncComposerSubmitState,onError:message=>toast(message,5000)});
 boot();

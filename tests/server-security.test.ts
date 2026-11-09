@@ -10,7 +10,8 @@ describe("WebUI server security boundary", () => {
       expect(isAllowedBrowserRpcMethod(method)).toBe(true);
     }
     for (const method of ["thread/compact/start", "thread/fork", "thread/name/set", "thread/archive", "thread/unarchive", "host/thread/pin"]) expect(isAllowedBrowserRpcMethod(method)).toBe(true);
-    for (const method of ["fs/readFile", "fs/writeFile", "fs/remove", "fs/copy", "config/read", "account/read", "skills/list"]) {
+    for (const method of ["host/side/start", "host/side/read", "host/side/send", "host/side/interrupt", "host/side/close"]) expect(isAllowedBrowserRpcMethod(method)).toBe(true);
+    for (const method of ["fs/readFile", "fs/writeFile", "fs/remove", "fs/copy", "config/read", "account/read", "skills/list", "host/side/reset", "host/side/constructor", "thread/unsubscribe"]) {
       expect(isAllowedBrowserRpcMethod(method)).toBe(false);
     }
   });
@@ -21,10 +22,13 @@ describe("WebUI server security boundary", () => {
       writeFileSync(join(root, "style.css"), "body{}\n");
       writeFileSync(join(root, "favicon.svg"), "<svg/>\n");
       writeFileSync(join(root, "i18n.js"), "export {};\n");
+      writeFileSync(join(root, "file-highlight-worker.bundle.js"), "self.onmessage=()=>{};\n");
       writeFileSync(join(root, "unknown.txt"), "not public\n");
       expect(resolvePublicAsset("/style.css", root)).toBe(realpathSync(join(root, "style.css")));
       expect(resolvePublicAsset("/favicon.svg", root)).toBe(realpathSync(join(root, "favicon.svg")));
       expect(resolvePublicAsset("/i18n.js", root)).toBe(realpathSync(join(root, "i18n.js")));
+      expect(resolvePublicAsset("/file-highlight-worker.bundle.js", root)).toBe(realpathSync(join(root, "file-highlight-worker.bundle.js")));
+      expect(resolvePublicAsset("/assets/file-icons/unknown.svg", root)).toBeNull();
       expect(resolvePublicAsset("/unknown.txt", root)).toBeNull();
       expect(resolvePublicAsset("/%ZZ", root)).toBeNull();
 

@@ -104,7 +104,17 @@ export function buildApprovalModel(request) {
 }
 
 function cleanDiffPath(value = "") {
-  return value.replace(/^[ab]\//, "").replace(/\t.*$/, "");
+  let path = value.replace(/\t.*$/, "");
+  if (path.startsWith('"') && path.endsWith('"')) {
+    // Git quotes UTF-8 paths with octal bytes, rather than JSON Unicode escapes.
+    const bytes = [];
+    for (const token of path.slice(1, -1).match(/\\[0-7]{1,3}|\\.|[^\\]+/g) || []) {
+      if (/^\\[0-7]/.test(token)) bytes.push(parseInt(token.slice(1), 8));
+      else bytes.push(...new TextEncoder().encode(token.startsWith('\\') ? ({ n: '\n', t: '\t', r: '\r' }[token[1]] || token[1]) : token));
+    }
+    path = new TextDecoder().decode(new Uint8Array(bytes));
+  }
+  return path.replace(/^[ab]\//, "");
 }
 
 export function parseUnifiedDiff(diff = "") {
@@ -113,34 +123,58 @@ export function parseUnifiedDiff(diff = "") {
   let hunk = null;
   let linesAdded = 0;
   let linesDeleted = 0;
-  for (const raw of String(diff).split("\n")) {
-    const git = raw.match(/^diff --git a\/(.+) b\/(.+)$/);
+  let oldLine = 0, newLine = 0, oldRemaining = 0, newRemaining = 0;
+  let pendingOldPath = "";
+  const createFile = (path, oldPath = path) => ({ path, oldPath, kind: 'update', linesAdded: 0, linesDeleted: 0, hunks: [], metadata: [] });
+  for (const raw of String(diff).replace(/\r\n/g, '\n').split("\n")) {
+    const git = raw.match(/^diff --git ("(?:\\.|[^"\\])*"|a\/.+) ("(?:\\.|[^"\\])*"|b\/.+)$/);
     if (git) {
-      file = { path: git[2], oldPath: git[1], linesAdded: 0, linesDeleted: 0, hunks: [] };
+      file = createFile(cleanDiffPath(git[2]), cleanDiffPath(git[1]));
       files.push(file);
       hunk = null;
       continue;
     }
-    if (!file && raw.startsWith("+++ ")) {
-      file = { path: cleanDiffPath(raw.slice(4)), oldPath: "", linesAdded: 0, linesDeleted: 0, hunks: [] };
-      files.push(file);
-    }
-    if (!file) continue;
-    if (raw.startsWith("--- ")) { file.oldPath = cleanDiffPath(raw.slice(4)); continue; }
-    if (raw.startsWith("+++ ")) { file.path = cleanDiffPath(raw.slice(4)); continue; }
-    if (raw.startsWith("@@")) {
+    if (hunk && oldRemaining === 0 && newRemaining === 0 && !raw.startsWith('\\ No newline')) hunk = null;
+    const header = raw.match(/^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/);
+    if (header && file) {
+      oldLine = Number(header[1]); newLine = Number(header[3]);
+      oldRemaining = Number(header[2] ?? 1); newRemaining = Number(header[4] ?? 1);
       hunk = { header: raw, lines: [] };
       file.hunks.push(hunk);
       continue;
     }
-    if (!hunk) continue;
-    let type = "context";
-    if (raw.startsWith("+") && !raw.startsWith("+++")) { type = "add"; file.linesAdded++; linesAdded++; }
-    else if (raw.startsWith("-") && !raw.startsWith("---")) { type = "delete"; file.linesDeleted++; linesDeleted++; }
-    else if (raw.startsWith("\\ No newline")) type = "meta";
-    hunk.lines.push({ type, text: raw.slice(type === "add" || type === "delete" || type === "context" ? 1 : 0) });
+    if (!hunk) {
+      if (raw.startsWith('--- ')) {
+        pendingOldPath = cleanDiffPath(raw.slice(4));
+        if (file?.hunks.length) file = null;
+        if (file) file.oldPath = pendingOldPath;
+      } else if (raw.startsWith('+++ ')) {
+        const path = cleanDiffPath(raw.slice(4));
+        if (!file) { file = createFile(path, pendingOldPath); files.push(file); }
+        file.path = path === '/dev/null' ? file.oldPath : path;
+        if (path === '/dev/null') file.kind = 'delete';
+        else if (file.oldPath === '/dev/null') file.kind = 'add';
+      } else if (file && /^(?:new file|deleted file|old mode|new mode|rename (?:from|to)|similarity index|Binary files|GIT binary patch)/.test(raw)) {
+        file.metadata.push(raw);
+        if (raw.startsWith('new file')) file.kind = 'add';
+        if (raw.startsWith('deleted file')) file.kind = 'delete';
+        if (raw.startsWith('rename to ')) { file.kind = 'rename'; file.path = cleanDiffPath(raw.slice(10)); }
+        if (raw.startsWith('rename from ')) file.oldPath = cleanDiffPath(raw.slice(12));
+        if (/^(?:Binary files|GIT binary patch)/.test(raw)) file.binary = true;
+      }
+      continue;
+    }
+    if (raw.startsWith('\\ No newline')) { hunk.lines.push({ type: 'meta', text: raw }); continue; }
+    const type = raw[0] === '+' ? 'add' : raw[0] === '-' ? 'delete' : raw[0] === ' ' ? 'context' : null;
+    if (!type) continue;
+    const line = { type, text: raw.slice(1), oldLine: type === 'add' ? null : oldLine++, newLine: type === 'delete' ? null : newLine++ };
+    if (type !== 'add') oldRemaining--;
+    if (type !== 'delete') newRemaining--;
+    if (type === 'add') { file.linesAdded++; linesAdded++; }
+    if (type === 'delete') { file.linesDeleted++; linesDeleted++; }
+    hunk.lines.push(line);
   }
-  return { hasChanges: files.length > 0 && (linesAdded + linesDeleted > 0), fileCount: files.length, linesAdded, linesDeleted, files };
+  return { hasChanges: files.length > 0, fileCount: files.length, linesAdded, linesDeleted, files };
 }
 
 function fileChangeKind(change = {}) {
@@ -151,21 +185,31 @@ export function unifiedDiffFromFileChanges(changes = []) {
   const sections = [];
   for (const change of changes) {
     const path = String(change?.path || change?.filePath || "");
-    const diff = String(change?.diff || change?.unified_diff || "").trimEnd();
-    if (!path || !diff || /[\r\n]/.test(path)) continue;
+    let diff = change?.diff ?? change?.unified_diff;
+    const kind = fileChangeKind(change);
+    if (!path || typeof diff !== 'string' || /[\r\n]/.test(path)) continue;
+    const hunkPatch = /^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@/m.test(diff) || /^diff --git /m.test(diff);
+    // Add/delete items from app-server contain the file body, not a unified patch.
+    if ((kind === 'add' || kind === 'delete') && !hunkPatch) {
+      const content = diff.split('\n');
+      if (content.at(-1) === '') content.pop();
+      const count = content.length, sign = kind === 'add' ? '+' : '-';
+      const endsWithNewline = diff.endsWith('\n');
+      diff = count ? `@@ -${kind === 'add' ? '0,0' : `1,${count}`} +${kind === 'delete' ? '0,0' : `1,${count}`} @@\n${content.map(line => sign + line).join('\n')}${endsWithNewline ? '' : '\n\\ No newline at end of file'}` : '';
+    } else if (!diff) continue;
     if (/^diff --git /m.test(diff)) {
       sections.push(diff);
       continue;
     }
-    const kind = fileChangeKind(change);
-    const oldPath = kind === "add" ? "/dev/null" : `a/${path}`;
-    const newPath = kind === "delete" ? "/dev/null" : `b/${path}`;
+    const quote = value => /[\s"\\]/.test(value) ? JSON.stringify(value) : value;
+    const oldPath = kind === "add" ? "/dev/null" : quote(`a/${path}`);
+    const newPath = kind === "delete" ? "/dev/null" : quote(`b/${path}`);
     const metadata = /^--- /m.test(diff) && /^\+\+\+ /m.test(diff)
       ? diff
       : `--- ${oldPath}\n+++ ${newPath}\n${diff}`;
-    sections.push(`diff --git a/${path} b/${path}\n${metadata}`);
+    sections.push(`diff --git ${quote(`a/${path}`)} ${quote(`b/${path}`)}\n${metadata}`);
   }
-  return sections.join("\n");
+  return sections.map(section => section.endsWith('\n') ? section : section + '\n').join('');
 }
 
 function shellWords(command = "") {

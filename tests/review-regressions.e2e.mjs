@@ -75,6 +75,8 @@ try {
     phase = `${transport}: failed resume preserves new draft`;
     await page.evaluate(() => globalThis.__codexWebuiDebug.openThread('parent-sse'));
     configure({ startDelay: 0, resumeDelay: 500, resumeReject: true });
+    // Simulate ownership becoming unavailable after the initial open check.
+    await page.evaluate(() => { globalThis.__codexWebuiDebug.state.active.canAcceptDirectInput = false; });
     await page.locator('#prompt').fill(`Retry me ${transport}`); await page.locator('#prompt').press('Enter');
     await page.locator('#prompt').fill('New text while awaiting response');
     await page.locator('#conversation').getByText('HTTP 503: resume unavailable', { exact: true }).waitFor();

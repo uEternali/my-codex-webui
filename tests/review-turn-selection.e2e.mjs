@@ -21,7 +21,7 @@ const selected=await page.evaluate(()=>({
   turnId:globalThis.__codexWebuiDebug.state.activeReview?.turnId,
   files:[...document.querySelectorAll('.review-file-name')].map(node=>node.textContent.trim()),
 }));
-await page.click('#reviewTab');
+await page.click('#sidePanelTabs [data-side-panel-tab=review]');
 const selectedAfterTabClick=await page.evaluate(()=>({
   turnId:globalThis.__codexWebuiDebug.state.activeReview?.turnId,
   files:[...document.querySelectorAll('.review-file-name')].map(node=>node.textContent.trim()),

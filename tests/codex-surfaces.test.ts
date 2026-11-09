@@ -97,6 +97,44 @@ describe("Codex review surfaces", () => {
     expect(review.files.map(file => file.path)).toEqual(["src/a.ts", "src/new.ts"]);
     expect(diff).toContain("--- /dev/null\n+++ b/src/new.ts");
   });
+
+  test("reads the complete file bodies returned for native add/delete items", () => {
+    const raw = 'def main():\n    print("Hello, world!")  \n\n';
+    const review = parseUnifiedDiff(unifiedDiffFromFileChanges([
+      { path: '/project/main.py', kind: { type: 'add' }, diff: raw },
+      { path: 'old.txt', kind: { type: 'delete' }, diff: 'deleted without newline' },
+      { path: 'empty.txt', kind: { type: 'add' }, diff: '' },
+    ]));
+    expect(review.fileCount).toBe(3);
+    expect(review.linesAdded).toBe(3);
+    expect(review.linesDeleted).toBe(1);
+    expect(review.files[0].hunks[0].lines.map(line => line.text).join('\n') + '\n').toBe(raw);
+    expect(review.files[0].hunks[0].lines[1]).toMatchObject({ oldLine: null, newLine: 2 });
+    expect(review.files[1]).toMatchObject({ path: 'old.txt', kind: 'delete' });
+    expect(review.files[1].hunks[0].lines[0]).toMatchObject({ oldLine: 1, newLine: null });
+    expect(review.files[1].hunks[0].lines[1].type).toBe('meta');
+    expect(review.files[2]).toMatchObject({ path: 'empty.txt', kind: 'add', hunks: [] });
+  });
+
+  test("keeps real line numbers and header-like source lines inside a hunk", () => {
+    const review = parseUnifiedDiff('--- a/one.txt\n+++ b/one.txt\n@@ -8,2 +12,2 @@\n--- old source\n+++ new source\n same\n--- a/two.txt\n+++ b/two.txt\n@@ -0,0 +1 @@\n+second file\n');
+    expect(review.fileCount).toBe(2);
+    expect(review.files[0].hunks[0].lines).toEqual([
+      { type: 'delete', text: '-- old source', oldLine: 8, newLine: null },
+      { type: 'add', text: '++ new source', oldLine: null, newLine: 12 },
+      { type: 'context', text: 'same', oldLine: 9, newLine: 13 },
+    ]);
+    expect(review.files[1].hunks[0].lines).toHaveLength(1);
+  });
+
+  test("handles Git quoted Unicode paths, binary changes and renames", () => {
+    const file = parseUnifiedDiff('diff --git "a/\\346\\265\\213\\350\\257\\225 file.txt" "b/\\346\\265\\213\\350\\257\\225 file.txt"\n--- "a/\\346\\265\\213\\350\\257\\225 file.txt"\n+++ "b/\\346\\265\\213\\350\\257\\225 file.txt"\n@@ -1 +1 @@\n-old\n+new\n').files[0];
+    expect(file.path).toBe('测试 file.txt');
+    const metadata = parseUnifiedDiff('diff --git a/old.bin b/old.bin\nBinary files a/old.bin and b/old.bin differ\ndiff --git a/from.txt b/to.txt\nsimilarity index 100%\nrename from from.txt\nrename to to.txt\n');
+    expect(metadata.hasChanges).toBe(true);
+    expect(metadata.files[0].binary).toBe(true);
+    expect(metadata.files[1]).toMatchObject({ path: 'to.txt', oldPath: 'from.txt', kind: 'rename' });
+  });
 });
 
 describe("Codex review controls", () => {
