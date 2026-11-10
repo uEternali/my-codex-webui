@@ -1,4 +1,5 @@
 import pty from 'node-pty';
+import { hostname } from 'node:os';
 
 const cwd = process.argv[2] || process.cwd();
 const cols = Number(process.argv[3]) || 100;
@@ -10,7 +11,8 @@ const terminal = pty.spawn(shell, args, {
   cols,
   rows,
   cwd,
-  env: { ...process.env, TERM: 'xterm-256color', COLORTERM: 'truecolor' },
+  // HOST configures the WebUI listener; zsh also uses it for %m in prompts.
+  env: { ...process.env, HOST: hostname(), TERM: 'xterm-256color', COLORTERM: 'truecolor' },
 });
 
 terminal.onData(data => process.stdout.write(data));
