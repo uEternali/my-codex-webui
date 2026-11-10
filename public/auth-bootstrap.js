@@ -1,5 +1,6 @@
 import { codexInterfaceMark } from './codex-brand.js';
 import { createDomI18n, createI18n } from './i18n.js';
+import { fetchJson } from './fetch-json.js';
 
 const $=selector=>document.querySelector(selector);
 const i18n=globalThis.__codexWebuiI18n||createI18n();
@@ -40,9 +41,7 @@ async function start(){
   startup.begin();
   let status;
   try{
-    const response=await fetch('/api/auth/status',{cache:'no-store'});
-    if(!response.ok)throw new Error(`Authentication status failed (${response.status})`);
-    status=await response.json();
+    status=await fetchJson('/api/auth/status');
   }catch(reason){console.error('[codex-webui] authentication status failed',reason);startup.fail(reason);return}
   if(status.authenticated||(!status.setupRequired&&!status.passwordRequired)){await loadApp();return}
   const gate=$('#passwordGate'),input=$('#passwordInput'),confirmInput=$('#passwordConfirmInput'),form=$('#passwordLoginForm'),button=$('#passwordLoginButton'),error=$('#passwordError'),title=$('#passwordTitle');
@@ -67,15 +66,10 @@ async function start(){
     const endpoint=mode==='setup'?'/api/auth/setup':'/api/auth/login';
     button.disabled=true;button.textContent=t(mode==='setup'?'Setting password…':'Logging in…');
     try{
-      const response=await fetch(endpoint,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({password:input.value})});
-      const data=await response.json().catch(()=>({}));
-      if(!response.ok){
-        if(mode==='setup'&&response.status===409){mode='login';input.value='';configure();throw new Error(t('A password was already set. Log in to continue.'));}
-        throw new Error(data.error||t(mode==='setup'?'Unable to set the password':'Unable to log in'));
-      }
+      await fetchJson(endpoint,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({password:input.value})});
       gate.hidden=true;startup.begin();input.value='';confirmInput.value='';
       await loadApp();
-    }catch(reason){if(gate.hidden){startup.fail(reason);return}error.textContent=reason instanceof Error?reason.message:String(reason);error.hidden=false;input.select()}
+    }catch(reason){if(gate.hidden){startup.fail(reason);return}if(mode==='setup'&&reason.status===409){mode='login';input.value='';configure();reason=new Error(t('A password was already set. Log in to continue.'))}error.textContent=reason instanceof Error?reason.message:String(reason);error.hidden=false;input.select()}
     finally{button.disabled=false;button.textContent=t(mode==='setup'?'Set password':'Log in')}
   };
 }

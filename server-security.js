@@ -37,6 +37,7 @@ const PUBLIC_ASSETS = new Set([
   "/style.css",
   "/favicon.svg",
   "/auth-bootstrap.js",
+  "/fetch-json.js",
   "/i18n.js",
   "/codex-brand.js",
   "/app.bundle.js",

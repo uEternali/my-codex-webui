@@ -2,7 +2,7 @@ import { createServer } from 'node:net';
 import { chmod, copyFile, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { chromium } from 'playwright';
+import { chromium, webkit } from 'playwright';
 import { artifact, launchOptions, root } from './browser-runtime.mjs';
 
 const assert = (value, message) => { if (!value) throw new Error(message); };
@@ -30,16 +30,16 @@ try {
     if (Date.now() > deadline) throw new Error('Fixture server did not start');
     await Bun.sleep(50);
   }
-  browser = await chromium.launch(launchOptions());
+  browser = process.env.PLAYWRIGHT_BROWSER === 'webkit' ? await webkit.launch({ headless: true }) : await chromium.launch(launchOptions());
   const context = await browser.newContext({ viewport: { width: 1280, height: 850 }, colorScheme: 'light' });
   await context.addInitScript(() => { if (window === window.top) localStorage.setItem('codex-webui-locale', 'en'); });
   const page = await context.newPage(), errors = [];
   page.on('pageerror', error => errors.push(error.message));
-  const bundle = deferred(), bundleReached = deferred(), config = deferred(), configReached = deferred(), connected = deferred(), models = deferred(), modelsReached = deferred(), account = deferred(), accountReached = deferred();
-  let history = null, historyReached = null, modelHold = models, modelReached = modelsReached, failNextModels = false, bridgeSocket;
+  const bundle = deferred(), bundleReached = deferred(), config = deferred(), configReached = deferred(), connected = deferred(), models = deferred(), modelsReached = deferred(), account = deferred(), accountReached = deferred(), profiles = deferred(), profilesReached = deferred();
+  let history = null, historyReached = null, modelHold = models, modelReached = modelsReached, failNextModels = false, failNextConfig = false, bridgeSocket;
   await page.route('**/app.bundle.js', async route => { bundleReached.resolve(); await bundle.promise; await route.continue(); });
   await page.route('**/api/account', async route => { accountReached.resolve(); await account.promise; await route.continue(); });
-  await page.route('**/api/config', async route => { configReached.resolve(); await config.promise; await route.continue(); });
+  await page.route('**/api/config', async route => { configReached.resolve(); await config.promise; if (failNextConfig) { failNextConfig = false; return route.fulfill({ status: 503, json: { error: 'Fixture configuration unavailable' } }); } await route.continue(); });
   await page.routeWebSocket('**/ws', socket => {
     bridgeSocket = socket;
     const upstream = socket.connectToServer(), methods = new Map();
@@ -51,8 +51,9 @@ try {
         modelReached?.resolve(); if (modelHold) await modelHold.promise;
         if (failNextModels) { failNextModels = false; socket.send(JSON.stringify({ type: 'rpc/error', id: message.id, error: 'Fixture model list unavailable' })); return; }
       }
+      if (message.type === 'rpc/result' && methods.get(message.id) === 'permissionProfile/list') { profilesReached.resolve(); await profiles.promise; message.result.data = [{ id: 'startup-profile', description: 'Deferred profile' }]; }
       if (message.type === 'rpc/result' && methods.get(message.id) === 'thread/read' && history) { historyReached.resolve(); await history.promise; }
-      socket.send(raw);
+      socket.send(JSON.stringify(message));
     });
   });
   const assertConnecting = async (stage, target = page) => {
@@ -81,8 +82,11 @@ try {
   await assertConnecting('Before Codex connects');
   connected.resolve(); await modelsReached.promise; await assertConnecting('Before initial data loads');
   await page.screenshot({ path: artifact('startup-icon-only.png') });
-  models.resolve(); await accountReached.promise; await assertConnecting('Before account data loads');
-  account.resolve(); await page.locator('#emptyState h1').waitFor(); await assertReady(page);
+  models.resolve(); await accountReached.promise; await profilesReached.promise;
+  await page.locator('#emptyState h1').waitFor(); await assertReady(page);
+  // Account identity and optional permission metadata must not block the whole app.
+  account.resolve(); profiles.resolve();
+  await page.waitForFunction(() => globalThis.__codexWebuiDebug.state.permissionProfiles.length > 0);
   modelHold = null; modelReached = null;
   assert((await page.locator('#emptyState h1').textContent()).includes('What can I help'), 'The connected new-task welcome must remain available');
 
@@ -145,6 +149,13 @@ try {
   assert(await page.locator('#startupRetry').isVisible() && !(await page.locator('#prompt').isVisible()), 'Failed startup must expose retry, not half-loaded controls');
   await page.locator('#startupRetry').click(); await assertReady(page);
 
+  failNextConfig = true;
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await page.locator('#startupError:not([hidden])').waitFor();
+  assert((await page.locator('#startupErrorDetail').textContent()).includes('Fixture configuration unavailable'), 'Configuration failure must expose a retry instead of connecting with incomplete settings');
+  assert(!(await page.locator('#prompt').isVisible()), 'Configuration failure must keep controls gated');
+  await page.locator('#startupRetry').click(); await assertReady(page);
+
   // The same gate must work across password login on a touch-sized screen.
   const phoneContext = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
   await phoneContext.addInitScript(() => { if (window === window.top) localStorage.setItem('codex-webui-locale', 'en'); });
@@ -177,7 +188,7 @@ try {
   await assertReady(phone);
   await phoneContext.close();
   assert(errors.length === 0, `Browser errors: ${errors.join('; ')}`);
-  console.log(JSON.stringify({ startupStages: ['static', 'configuration', 'connection', 'initial data', 'account', 'remembered history'], coordinatedReveal: true, reconnectPreservesDraft: true, failedStartupRetry: true, slowStartupRecovery: true, failedBundleRetry: true, mobilePasswordGate: true, liveInterruption: true, reloadedInterruption: true, terminalStates: terminalResults.map(({ status }) => status), lateEventsStaySettled: true, browserErrors: errors }, null, 2));
+  console.log(JSON.stringify({ startupStages: ['static', 'configuration', 'connection', 'initial data', 'remembered history'], optionalMetadataDoesNotBlock: true, configurationRetry: true, coordinatedReveal: true, reconnectPreservesDraft: true, failedStartupRetry: true, slowStartupRecovery: true, failedBundleRetry: true, mobilePasswordGate: true, liveInterruption: true, reloadedInterruption: true, terminalStates: terminalResults.map(({ status }) => status), lateEventsStaySettled: true, browserErrors: errors }, null, 2));
 } finally {
   await browser?.close(); server.kill(); await server.exited;
   await rm(temporary, { recursive: true, force: true });

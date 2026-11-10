@@ -1,5 +1,6 @@
 import { attachmentDirectory, readAttachmentBody } from './attachment-service.js';
 import { readJsonBody } from './http-body.js';
+import { createStaticAssetSender } from './static-assets.js';
 import { AttachmentLifecycle } from './attachment-lifecycle-service.js';
 import { AttachmentUploadStore } from './attachment-upload-service.js';
 import { createReadStream, existsSync, readFileSync } from "node:fs";
@@ -58,6 +59,7 @@ let passwordSetupInProgress = false;
 const localhostOnly = host === "127.0.0.1" || host === "::1" || host === "localhost";
 const appRoot = existsSync(resolve(import.meta.dir, "public")) ? import.meta.dir : resolve(import.meta.dir, "..");
 const publicDir = resolve(appRoot, "public");
+const sendStaticAsset = createStaticAssetSender();
 const homeDir = process.env.HOME || process.cwd();
 const projectless = process.env.CODEX_WEBUI_PROJECTLESS === "true";
 const configuredReviewRoot = process.env.CODEX_WEBUI_REVIEW_ROOT || null;
@@ -469,7 +471,7 @@ const server = createServer(async (req, res) => {
     return;
   }
   const appRoute = req.method === "GET" && (url.pathname === "/" || /^\/settings(?:\/[^/]+)?\/?$/.test(url.pathname));
-  const loginAssets = new Set(["/", "/index.html", "/style.css", "/favicon.svg", "/auth-bootstrap.js", "/i18n.js", "/codex-brand.js"]);
+  const loginAssets = new Set(["/", "/index.html", "/style.css", "/favicon.svg", "/auth-bootstrap.js", "/fetch-json.js", "/i18n.js", "/codex-brand.js"]);
   if (url.pathname === "/api/auth/status") {
     const authenticated = isAuthorizedHttpRequest(req, authSecret);
     res.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", "x-content-type-options": "nosniff" });
@@ -550,8 +552,7 @@ const server = createServer(async (req, res) => {
     if (appRoute || loginAssets.has(url.pathname)) {
       const file = resolvePublicAsset(appRoute ? "/" : url.pathname, publicDir);
       if (file) {
-        res.writeHead(200, { "content-type": mime[extname(file)] || "application/octet-stream", "cache-control": url.pathname.startsWith("/assets/file-icons/") ? "public, max-age=86400" : "no-store" });
-        res.end(readFileSync(file));
+        await sendStaticAsset(req, res, file, mime[extname(file)] || "application/octet-stream");
         return;
       }
     }
@@ -840,8 +841,7 @@ const server = createServer(async (req, res) => {
     if (!file) {
       res.writeHead(404, { "content-type": "text/plain; charset=utf-8" }); res.end("Not found"); return;
     }
-    res.writeHead(200, { "content-type": mime[extname(file)] || "application/octet-stream", "cache-control": "public, max-age=86400" });
-    res.end(readFileSync(file));
+    await sendStaticAsset(req, res, file, mime[extname(file)] || "application/octet-stream", "private, max-age=86400");
     return;
   }
   if (url.pathname === "/vendor/xterm/xterm.css") {
@@ -850,16 +850,14 @@ const server = createServer(async (req, res) => {
     if (!file) {
       res.writeHead(404, { "content-type": "text/plain; charset=utf-8" }); res.end("Not found"); return;
     }
-    res.writeHead(200, { "content-type": "text/css; charset=utf-8", "cache-control": "public, max-age=86400" });
-    res.end(readFileSync(file));
+    await sendStaticAsset(req, res, file, "text/css; charset=utf-8", "private, max-age=86400");
     return;
   }
   const file = resolvePublicAsset(appRoute ? "/" : url.pathname, publicDir);
   if (!file) {
     res.writeHead(404, { "content-type": "text/plain; charset=utf-8" }); res.end("Not found"); return;
   }
-  res.writeHead(200, { "content-type": mime[extname(file)] || "application/octet-stream", "cache-control": url.pathname.startsWith("/assets/file-icons/") ? "public, max-age=86400" : "no-store" });
-  res.end(readFileSync(file));
+  await sendStaticAsset(req, res, file, mime[extname(file)] || "application/octet-stream");
 });
 
 const sseKeepalive = setInterval(() => {

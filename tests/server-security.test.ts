@@ -22,11 +22,13 @@ describe("WebUI server security boundary", () => {
       writeFileSync(join(root, "style.css"), "body{}\n");
       writeFileSync(join(root, "favicon.svg"), "<svg/>\n");
       writeFileSync(join(root, "i18n.js"), "export {};\n");
+      writeFileSync(join(root, "fetch-json.js"), "export {};\n");
       writeFileSync(join(root, "file-highlight-worker.bundle.js"), "self.onmessage=()=>{};\n");
       writeFileSync(join(root, "unknown.txt"), "not public\n");
       expect(resolvePublicAsset("/style.css", root)).toBe(realpathSync(join(root, "style.css")));
       expect(resolvePublicAsset("/favicon.svg", root)).toBe(realpathSync(join(root, "favicon.svg")));
       expect(resolvePublicAsset("/i18n.js", root)).toBe(realpathSync(join(root, "i18n.js")));
+      expect(resolvePublicAsset("/fetch-json.js", root)).toBe(realpathSync(join(root, "fetch-json.js")));
       expect(resolvePublicAsset("/file-highlight-worker.bundle.js", root)).toBe(realpathSync(join(root, "file-highlight-worker.bundle.js")));
       expect(resolvePublicAsset("/assets/file-icons/unknown.svg", root)).toBeNull();
       expect(resolvePublicAsset("/unknown.txt", root)).toBeNull();
