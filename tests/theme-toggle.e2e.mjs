@@ -41,11 +41,22 @@ try {
   assert(await page.locator('.file-preview-code .hljs-keyword').first().evaluate(node => getComputedStyle(node).color) === 'rgb(155, 42, 124)', 'Light syntax follows the explicit light theme on a dark OS');
   await page.locator('#toggleBottomPanel').click();
   await page.waitForFunction(() => globalThis.__codexTerminal?.term && globalThis.__codexTerminal.state.ws?.readyState === 1);
-  assert(await page.evaluate(() => getComputedStyle(document.body).backgroundColor === 'rgb(250, 250, 250)' && globalThis.__codexTerminal.term.options.theme.background === '#fafafa' && globalThis.__codexTerminal.term.options.minimumContrastRatio === 4.5), 'Light mode uses a soft gray background and makes low-contrast terminal colors legible');
+  assert(await page.evaluate(() => {
+    const { theme, minimumContrastRatio } = globalThis.__codexTerminal.term.options;
+    const luminance = color => {
+      const rgb = color.match(/\w\w/g).map(value => parseInt(value, 16) / 255).map(value => value <= .04045 ? value / 12.92 : ((value + .055) / 1.055) ** 2.4);
+      return rgb[0] * .2126 + rgb[1] * .7152 + rgb[2] * .0722;
+    };
+    const colors = ['black', 'red', 'green', 'yellow', 'blue', 'magenta', 'cyan', 'white', 'brightBlack', 'brightRed', 'brightGreen', 'brightYellow', 'brightBlue', 'brightMagenta', 'brightCyan', 'brightWhite'];
+    return getComputedStyle(document.body).backgroundColor === 'rgb(250, 250, 250)' && theme.background === '#fafafa' && minimumContrastRatio === 7 && colors.every(color => typeof theme[color] === 'string' && (luminance(theme.background) + .05) / (luminance(theme[color]) + .05) >= 7);
+  }), 'Light terminals use an explicit ANSI palette with at least 7:1 text contrast, including bold colors');
+  await page.evaluate(() => new Promise(resolve => globalThis.__codexTerminal.term.write('\r\n\x1b[1;32m● System:\x1b[0m CSE WSL Ubuntu 20.04 (WSL2)\r\n\x1b[1;34m● Kernel:\x1b[0m 6.18.33.2-microsoft-standard-WSL2\r\n\x1b[1;36m● IP    :\x1b[0m 100.65.202.49\r\n\x1b[1;33m● Time  :\x1b[0m 2026-11-10 16:21:50\r\n\r\n\x1b[1;32mstqiu@csewsl\x1b[0m \x1b[1;34mcodebase/multi_turn_kvreuse\x1b[0m \x1b[33m(master)\x1b[0m » ', resolve)));
+  await page.locator('.terminal-host:visible .xterm-screen').screenshot({ path: artifact('theme-light-terminal.png') });
   await page.evaluate(() => { window.__themeTerminal = globalThis.__codexTerminal.term; window.__themeSocket = globalThis.__codexTerminal.state.ws; });
   await page.locator('#toggleTheme').click(); await expectTheme(page, 'dark');
   assert(await page.locator('.file-preview-code .hljs-keyword').first().evaluate(node => getComputedStyle(node).color) === 'rgb(216, 161, 230)', 'Existing syntax highlighting switches with the page');
-  assert(await page.evaluate(() => globalThis.__codexTerminal.term === window.__themeTerminal && globalThis.__codexTerminal.state.ws === window.__themeSocket && globalThis.__codexTerminal.term.options.theme.background === '#242424' && globalThis.__codexTerminal.term.options.minimumContrastRatio === 1), 'Switching updates an existing terminal without restarting it and retains the original dark palette');
+  assert(await page.evaluate(() => globalThis.__codexTerminal.term === window.__themeTerminal && globalThis.__codexTerminal.state.ws === window.__themeSocket && globalThis.__codexTerminal.term.options.theme.background === '#242424' && globalThis.__codexTerminal.term.options.theme.green === undefined && globalThis.__codexTerminal.term.options.minimumContrastRatio === 1), 'Switching updates an existing terminal without restarting it and restores the original dark ANSI palette');
+  await page.locator('.terminal-host:visible .xterm-screen').screenshot({ path: artifact('theme-dark-terminal.png') });
   await page.locator('#closeBottomPanel').click(); await page.locator('#closeSidePanel').click();
   phase = 'dialog and persistence';
   await page.locator('.thread-item[data-id="theme-0"]').hover();
