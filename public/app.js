@@ -1164,7 +1164,7 @@ function connectTerminal(terminalState){if(terminalState.closed||terminalState.e
 function terminalTheme(){
   const style=getComputedStyle(document.documentElement),foreground=style.getPropertyValue('--app-text').trim(),dark=document.documentElement.dataset.theme==='dark';
   // Shell prompts use ANSI colors; give light mode its own palette instead of darkening bright defaults.
-  const palette=dark?{}:{black:'#1f2328',red:'#9f1b1b',green:'#115c2b',yellow:'#6b4f00',blue:'#034da4',magenta:'#862185',cyan:'#005f6b',white:'#434b55',brightBlack:'#4e5762',brightRed:'#a51d25',brightGreen:'#116329',brightYellow:'#6b5200',brightBlue:'#0550ae',brightMagenta:'#8a268f',brightCyan:'#005f69',brightWhite:'#1f2328'};
+  const palette=dark?{}:{black:'#1f2328',red:'#aa0000',green:'#005d00',yellow:'#7c4300',blue:'#003dcc',magenta:'#900090',cyan:'#005a7d',white:'#434b55',brightBlack:'#4e5762',brightRed:'#ac0010',brightGreen:'#006400',brightYellow:'#804000',brightBlue:'#003ad0',brightMagenta:'#8c0099',brightCyan:'#005c80',brightWhite:'#1f2328'};
   return{...palette,background:style.getPropertyValue('--app-main').trim(),foreground,cursor:foreground,selectionBackground:dark?'#3b4a5a':'#c8dcf4'}
 }
 function terminalContrast(){return document.documentElement.dataset.theme==='dark'?1:7}
