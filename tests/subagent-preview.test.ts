@@ -34,8 +34,28 @@ test('loading preview never resumes, writes or changes the selected main chat', 
   try {
     viewer.open({ id: 'child', name: 'Curie' }); await settled(node);
     expect(node.textContent).toContain('Persisted child content'); expect(owner).toBe('main');
-    expect(calls.map(call => call.method)).toEqual(['thread/read', 'thread/turns/list', 'host/thread/live']);
+    expect(calls.map(call => call.method)).toEqual(['host/thread/live', 'thread/read', 'thread/turns/list']);
     owner = 'other'; viewer.syncOwner(); expect(node.hidden).toBe(true); expect(viewer.selected).toBeNull();
+  } finally { viewer.close(); }
+});
+
+test('unchanged subagent previews skip history requests and preserve existing content', async () => {
+  const node = root(), calls = []; let revision = 'r1', answer = 'Initial child answer';
+  const viewer = createSubagentPreview({ root: node, getOwnerId: () => 'main', isVisible: () => true, t: x => x, onOpenChat() {}, rpc: async (method, params) => {
+    calls.push({ method, params });
+    if (method === 'host/thread/live') return params.sinceRevision === revision ? { revision, active: false, unchanged: true } : { revision, active: false };
+    if (method === 'thread/read') return { thread: { id: 'child' } };
+    return { data: [{ id: 'turn', items: [{ type: 'agentMessage', text: answer }] }] };
+  } });
+  try {
+    viewer.open({ id: 'child' }); await settled(node);
+    const original = node.querySelector('[data-subagent-content]').firstElementChild;
+    await viewer.refresh(); await viewer.refresh();
+    expect(calls.filter(call => call.method === 'thread/turns/list')).toHaveLength(1);
+    expect(node.querySelector('[data-subagent-content]').firstElementChild).toBe(original);
+    revision = 'r2'; answer = 'Updated child answer'; await viewer.refresh();
+    expect(node.textContent).toContain(answer);
+    expect(calls.filter(call => call.method === 'thread/turns/list')).toHaveLength(2);
   } finally { viewer.close(); }
 });
 

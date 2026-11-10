@@ -2,6 +2,8 @@ import { attachmentInput, createAttachmentController } from './attachments.js';
 import { renderUserAttachments, userMessageContent } from './user-attachments.js';
 import { DEFAULT_TURN_PAGE_SIZE, applyComposerSuggestion, createLatestRequestGate, createTurnWindow, filterAppModels, getComposerAutocomplete, resolveComposerPlaceholder, selectModelState } from './ui-core.js';
 import { HISTORY_ITEM_PAGE_SIZE, historyItemWindow } from './history-window.js';
+import { createThreadTurnReader } from './thread-sync.js';
+import { postBridgeJson, waitForRpcResponse } from './bridge-rpc.js';
 import { agentMessageText, renderAssistantMarkdown, renderItemImages } from './rendering.js';
 import { codexIcon, hydrateCodexIcons } from './codex-icons.js';
 import { codexInterfaceMark } from './codex-brand.js';
@@ -81,7 +83,8 @@ const threadOpenRequestGate=createLatestRequestGate();
 const SIDEBAR_PROJECT_EXPANSION_KEY='codex-webui-sidebar-project-expansion';
 const sidebarProjectExpansion=(()=>{try{return JSON.parse(localStorage.getItem(SIDEBAR_PROJECT_EXPANSION_KEY)||'{}')}catch{return{}}})();
 const ACTIVE_THREAD_SYNC_ACTIVE_MS=800,ACTIVE_THREAD_SYNC_IDLE_MS=2400,THREAD_LIST_POLL_MS=3000;
-let activeThreadSyncTimer=null,activeThreadSyncGeneration=0,activeThreadSyncInFlight=false,activeThreadSyncSignature='',threadListTimer=null,threadListInFlight=false,threadListSignature='',initialLoadGeneration=0,turnRenderDepth=0;
+const threadTurnReader=createThreadTurnReader(rpc);
+let activeThreadSyncTimer=null,activeThreadSyncGeneration=0,activeThreadSyncInFlight=null,activeThreadSyncSignature='',threadListTimer=null,threadListInFlight=false,threadListSignature='',initialLoadGeneration=0,turnRenderDepth=0;
 
 const icons = {
   chevron:codexIcon('chevronRight','activity-chevron'),
@@ -99,7 +102,7 @@ const WS_CONNECT_TIMEOUT_MS=5000;
 function transportSwitchError(){const error=new Error('Bridge transport changed');error.silentTransportSwitch=true;return error}
 function clearWsFallbackTimer(){clearTimeout(state.wsFallbackTimer);state.wsFallbackTimer=null}
 function rejectWebSocketPending(){for(const pending of state.pending.values())pending.reject(transportSwitchError());state.pending.clear()}
-async function postBridge(path,payload){const response=await fetch(path,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(payload),cache:'no-store'}),data=await response.json().catch(()=>({}));if(!response.ok){const error=createBridgeError(data.error||data.message||`Codex bridge request failed (HTTP ${response.status})`,data.code);error.httpStatusCode=response.status;throw error}return data}
+async function postBridge(path,payload){const {response,data}=await postBridgeJson(path,payload);if(!response.ok){const error=createBridgeError(data.error||data.message||`Codex bridge request failed (HTTP ${response.status})`,data.code);error.httpStatusCode=response.status;throw error}return data}
 function connectSse(){
   if(state.events)return;
   state.transport='sse';state.connected=false;setStatus('connecting','Connecting to Codex');
@@ -128,7 +131,7 @@ function connect(){
 function rpc(method,params={}){
   const id=state.rpcId++;
   if(state.transport==='sse')return postBridge('/api/rpc',{id,method,params}).then(message=>{if(message.type!=='rpc/result')throw createBridgeError(message.error||'Codex bridge request failed',message.code);return message.result});
-  if(state.ws?.readyState===WebSocket.OPEN){try{state.ws.send(JSON.stringify({type:'rpc',id,method,params}));return new Promise((resolve,reject)=>state.pending.set(id,{resolve,reject}))}catch{fallbackToSse(state.ws);return Promise.reject(transportSwitchError())}}
+  if(state.ws?.readyState===WebSocket.OPEN){const ws=state.ws;return waitForRpcResponse(state.pending,id,()=>{try{ws.send(JSON.stringify({type:'rpc',id,method,params}))}catch{fallbackToSse(ws);throw transportSwitchError()}},{method,onTimeout:()=>fallbackToSse(ws)})}
   return Promise.reject(transportSwitchError());
 }
 function respondToCodex(requestId,result,error){
@@ -138,7 +141,7 @@ function respondToCodex(requestId,result,error){
 }
 function handle(message){
   if(message.type==='bridge/status'){
-    if(message.status==='connected'){const shouldLoad=!state.connected;state.connected=true;setStatus('connected','Codex connected');if(shouldLoad){loadInitial();threadControls?.connected();requestTaskNotifyPermission()}}
+    if(message.status==='connected'){const shouldLoad=!state.connected;state.connected=true;setStatus('connected','Codex connected');if(shouldLoad){threadTurnReader.reset();void goalControls?.refresh({force:true});scheduleActiveThreadSync(0);loadInitial();threadControls?.connected();requestTaskNotifyPermission()}}
     else{state.connected=false;setStatus('connecting','Connecting to Codex')}
     return;
   }
@@ -1029,11 +1032,12 @@ async function submitPrompt(event){
 function threadSummarySignature(threads){return JSON.stringify(threads.map(thread=>[thread.id,thread.name,thread.preview,thread.pinnedAt,thread.updatedAt,thread.recencyAt,thread.status]))}
 function applyThreadSummaries(threads){const nextSignature=threadSummarySignature(threads),changed=nextSignature!==threadListSignature;threadListSignature=nextSignature;state.threads=threads;const summary=state.active&&threads.find(thread=>thread.id===state.active.id);if(summary){const turns=state.active.turns;const oldName=state.active.name;state.active={...state.active,...summary,turns};if(oldName!==state.active.name)renderHeader();if(summary.status?.type==='active')scheduleActiveThreadSync(0)}if(changed)renderThreads();syncSummaryPanel();if(sideTasksVisible())renderSideTasks()}
 function scheduleThreadListRefresh(delay=THREAD_LIST_POLL_MS){clearTimeout(threadListTimer);threadListTimer=setTimeout(refreshThreadList,document.visibilityState==='hidden'?Math.max(delay,8000):delay)}
-async function refreshThreadList(){if(threadListInFlight){scheduleThreadListRefresh(1000);return}threadListInFlight=true;try{const result=await loadSidebarThreads(rpc);applyThreadSummaries(result.data||[])}catch{}finally{threadListInFlight=false;scheduleThreadListRefresh()}}
+async function refreshThreadList(){if(threadListInFlight||!state.connected){scheduleThreadListRefresh(1000);return}threadListInFlight=true;try{const result=await loadSidebarThreads(rpc);applyThreadSummaries(result.data||[])}catch{}finally{threadListInFlight=false;scheduleThreadListRefresh()}}
 function refreshThreadsSoon(){scheduleThreadListRefresh(600)}
-function resetActiveThreadSync(){activeThreadSyncGeneration++;clearTimeout(activeThreadSyncTimer);activeThreadSyncTimer=null;activeThreadSyncSignature=''}
+function resetActiveThreadSync(){activeThreadSyncGeneration++;clearTimeout(activeThreadSyncTimer);activeThreadSyncTimer=null;activeThreadSyncSignature='';threadTurnReader.reset()}
 function scheduleActiveThreadSync(delay=ACTIVE_THREAD_SYNC_IDLE_MS){clearTimeout(activeThreadSyncTimer);if(!state.active)return;activeThreadSyncTimer=setTimeout(syncActiveThread,document.visibilityState==='hidden'?Math.max(delay,6000):delay)}
-async function latestThreadTurn(threadId){try{const previousUsage=state.tokenUsage.get(threadId),live=await rpc('host/thread/live',{threadId});if(live?.tokenUsage&&state.tokenUsage.get(threadId)===previousUsage){const currentTotal=previousUsage?.total?.totalTokens,liveTotal=live.tokenUsage.total?.totalTokens;if(!previousUsage||Number.isFinite(liveTotal)&&(!Number.isFinite(currentTotal)||liveTotal>=currentTotal)){state.tokenUsage.set(threadId,live.tokenUsage);if(threadId===state.active?.id)renderContextUsage()}}if(live?.active&&live.turn)return live.turn}catch{}try{const result=await rpc('thread/turns/list',{threadId,limit:1,sortDirection:'desc',itemsView:'full'});return result.data?.[0]||null}catch{const result=await rpc('thread/read',{threadId,includeTurns:true});return result.thread?.turns?.at(-1)||null}}
+async function latestThreadSnapshot(threadId,options={}){const previousUsage=state.tokenUsage.get(threadId);return threadTurnReader.read(threadId,{...options,onLive:live=>{if(live?.tokenUsage&&state.tokenUsage.get(threadId)===previousUsage){const currentTotal=previousUsage?.total?.totalTokens,liveTotal=live.tokenUsage.total?.totalTokens;if(!previousUsage||Number.isFinite(liveTotal)&&(!Number.isFinite(currentTotal)||liveTotal>=currentTotal)){state.tokenUsage.set(threadId,live.tokenUsage);if(threadId===state.active?.id)renderContextUsage()}}}})}
+async function latestThreadTurn(threadId){return(await latestThreadSnapshot(threadId)).turn}
 function activeTurnId(){return $('#sendButton')?.dataset.turnId||''}
 function syncComposerSubmitState(){const button=$('#sendButton');if(!button)return;
   const blocked=threadInputBlocked(),pending=blockedThreadActions.has(state.active?.id);
@@ -1050,7 +1054,7 @@ function syncTurnSnapshot(turn,threadId=state.active?.id){
   if((turn.items?.length||0)>HISTORY_ITEM_PAGE_SIZE||state.itemWindows.get(turn.id)?.hiddenCount)renderThread(state.active,0,{preserveScroll:true});else renderTurn(turn,root);
   renderPendingSteers();syncTurnRuntime(turn);if(nearBottom)scrollBottom();return true;
 }
-async function syncActiveThread(){if(activeThreadSyncInFlight||!state.active){scheduleActiveThreadSync();return}const generation=activeThreadSyncGeneration,threadId=state.active.id;activeThreadSyncInFlight=true;void goalControls?.refresh();let nextDelay=ACTIVE_THREAD_SYNC_IDLE_MS;try{const turn=await latestThreadTurn(threadId);if(generation!==activeThreadSyncGeneration||threadId!==state.active?.id)return;reconcileCompactionRequest(threadId,turn);if(turn){const signature=JSON.stringify(turn);nextDelay=turn.status==='inProgress'?ACTIVE_THREAD_SYNC_ACTIVE_MS:ACTIVE_THREAD_SYNC_IDLE_MS;if(signature!==activeThreadSyncSignature){activeThreadSyncSignature=signature;syncTurnSnapshot(turn,threadId)}}}catch{}finally{activeThreadSyncInFlight=false;if(generation===activeThreadSyncGeneration&&threadId===state.active?.id)scheduleActiveThreadSync(nextDelay)}}
+async function syncActiveThread(){if(!state.connected||!state.active||state.threadLoading||activeThreadSyncInFlight?.generation===activeThreadSyncGeneration){scheduleActiveThreadSync();return}const generation=activeThreadSyncGeneration,threadId=state.active.id,request={generation};activeThreadSyncInFlight=request;void goalControls?.refresh();let nextDelay=ACTIVE_THREAD_SYNC_IDLE_MS;try{const snapshot=await latestThreadSnapshot(threadId,{conditional:true});if(generation!==activeThreadSyncGeneration||threadId!==state.active?.id)return;nextDelay=snapshot.active?ACTIVE_THREAD_SYNC_ACTIVE_MS:ACTIVE_THREAD_SYNC_IDLE_MS;if(snapshot.unchanged)return;const turn=snapshot.turn;reconcileCompactionRequest(threadId,turn);if(turn){const signature=JSON.stringify(turn);if(signature!==activeThreadSyncSignature){activeThreadSyncSignature=signature;syncTurnSnapshot(turn,threadId)}}}catch{}finally{if(activeThreadSyncInFlight===request)activeThreadSyncInFlight=null;if(generation===activeThreadSyncGeneration&&threadId===state.active?.id)scheduleActiveThreadSync(nextDelay)}}
 function resizePrompt(){const e=$('#prompt');e.style.height='auto';e.style.height=Math.min(190,e.scrollHeight)+'px';syncComposerSubmitState()}
 function scrollBottom(){requestAnimationFrame(()=>{$('#conversation').scrollTop=$('#conversation').scrollHeight})}
 function scrollOpenedThreadToBottom(){const root=$('#conversation'),apply=()=>{root.scrollTop=root.scrollHeight};requestAnimationFrame(()=>{apply();requestAnimationFrame(apply)})}

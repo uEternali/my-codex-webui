@@ -1,4 +1,5 @@
 import { closeSync, fstatSync, openSync, readSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { StringDecoder } from "node:string_decoder";
 
 function contentText(content) {
@@ -223,15 +224,19 @@ export function parseRollout(text) {
 
 export class LiveSessionStore {
   #entries = new Map();
+  #epoch = randomUUID();
+  #sequence = 0;
 
-  read(path) {
+  read(path, { sinceRevision } = {}) {
     let entry = this.#entries.get(path);
     const fd = openSync(path, "r");
     try {
-      const { size, dev, ino } = fstatSync(fd);
-      if (!entry || size < entry.offset || dev !== entry.dev || ino !== entry.ino) {
+      const { size, dev, ino, mtimeMs, ctimeMs } = fstatSync(fd);
+      if (!entry || size < entry.offset || dev !== entry.dev || ino !== entry.ino
+        || size === entry.offset && (mtimeMs !== entry.mtimeMs || ctimeMs !== entry.ctimeMs)) {
         entry = { offset: 0, dev, ino, decoder: new StringDecoder("utf8"), remainder: "", state: newState() };
       }
+      const previousOffset = entry.offset;
       const bytes = Buffer.allocUnsafe(Math.min(64 * 1024, size - entry.offset));
       while (entry.offset < size) {
         const count = readSync(fd, bytes, 0, Math.min(bytes.length, size - entry.offset), entry.offset);
@@ -245,10 +250,17 @@ export class LiveSessionStore {
           catch { /* Ignore malformed historical records. */ }
         }
       }
+      if (!entry.revision || entry.offset !== previousOffset) entry.revision = `${this.#epoch}:${++this.#sequence}`;
+      entry.mtimeMs = mtimeMs; entry.ctimeMs = ctimeMs;
+      this.#entries.delete(path);
       this.#entries.set(path, entry);
+      // Long turns can retain megabytes of tool output. Keep only the most
+      // recently viewed rollouts; an evicted entry receives a fresh revision.
+      if (this.#entries.size > 16) this.#entries.delete(this.#entries.keys().next().value);
+      const metadata = { revision: entry.revision, active: entry.state.active, lastEventAt: entry.state.lastEventAt };
+      if (sinceRevision === entry.revision) return { ...metadata, unchanged: true };
       return {
-        active: entry.state.active,
-        lastEventAt: entry.state.lastEventAt,
+        ...metadata,
         turn: entry.state.active && entry.state.turn ? structuredClone(entry.state.turn) : null,
         tokenUsage: entry.state.tokenUsage ? structuredClone(entry.state.tokenUsage) : null,
       };

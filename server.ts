@@ -272,7 +272,7 @@ function recordThreadPathsFromRpc(result: any) {
   }
 }
 
-async function readLiveThread(threadId: unknown) {
+async function readLiveThread(threadId: unknown, sinceRevision?: unknown) {
   if (typeof threadId !== "string" || !threadId) throw new Error("Invalid thread id");
   let path = threadPaths.get(threadId);
   if (!path) {
@@ -284,7 +284,7 @@ async function readLiveThread(threadId: unknown) {
   const child = relative(codexSessionsRoot, resolve(path));
   const safePath = child && !child.startsWith("..") ? resolveSafeRegularFile(codexSessionsRoot, child) : null;
   if (!safePath) throw new Error("Thread rollout is outside the Codex sessions directory");
-  return liveSessions.read(safePath);
+  return liveSessions.read(safePath, { sinceRevision: typeof sinceRevision === "string" ? sinceRevision : undefined });
 }
 
 function broadcast(data: any) {
@@ -316,7 +316,7 @@ async function dispatchBrowserMessage(message: any) {
       if (message.method.startsWith("host/side/")) {
         const operation = message.method.slice("host/side/".length);
         result = await sideChats[operation](params);
-      } else if (message.method === "host/thread/live") result = await readLiveThread(params.threadId);
+      } else if (message.method === "host/thread/live") result = await readLiveThread(params.threadId, params.sinceRevision);
       else if (message.method === "host/thread/pin") {
         if (typeof params.threadId !== "string" || !params.threadId.trim() || typeof params.pinned !== "boolean") throw new Error("Invalid pin request");
         const { thread } = await readSummary(params.threadId);

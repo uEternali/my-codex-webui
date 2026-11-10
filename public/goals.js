@@ -1,12 +1,13 @@
 import { codexIcon } from './codex-icons.js';
 import { GoalStore, goalPresentation, parseGoalCommand } from './goal-state.js';
 
-export function createGoalController({ rpc, getThread, ensureThread, translate = value => value, onModeChange = () => {}, root = document }) {
+export function createGoalController({ rpc, getThread, ensureThread, translate = value => value, onModeChange = () => {}, root = document, refreshInterval = 10_000, now = Date.now }) {
   const $ = selector => root.querySelector(selector), t = translate, store = new GoalStore();
   const picker = $('#goalPicker'), button = $('#goalButton'), menu = $('#goalMenu');
   const dialog = $('#goalDialog'), form = $('#goalForm'), objective = $('#goalObjective');
   const error = $('#goalError'), dialogError = $('#goalDialogError');
   let selectedId = null, selection = 0, editorThreadId = null, busy = false, readId = 0, pendingRead = null;
+  let lastReadAt = -Infinity;
   const goal = () => store.get(selectedId);
   const setText = (node, value) => { if (node.textContent !== value) node.textContent = value; };
   const closeMenu = () => { menu.hidden = true; button.setAttribute('aria-expanded', 'false'); };
@@ -33,9 +34,11 @@ export function createGoalController({ rpc, getThread, ensureThread, translate =
     for (const action of menu.querySelectorAll('button')) action.disabled = busy;
   }
 
-  async function refresh() {
+  async function refresh({ force = false } = {}) {
     const threadId = selectedId;
     if (!threadId || busy || (pendingRead?.threadId === threadId && pendingRead.generation === selection)) return;
+    if (!force && now() - lastReadAt < refreshInterval) return;
+    lastReadAt = now();
     const request = ++readId, generation = selection, revision = store.revision(threadId);
     pendingRead = { threadId, generation, request };
     try {
@@ -54,7 +57,7 @@ export function createGoalController({ rpc, getThread, ensureThread, translate =
 
   function selectThread(threadId, { preserveEditor = false } = {}) {
     if (threadId === selectedId) return;
-    selectedId = threadId || null; selection++; readId++; clearErrors(); closeMenu();
+    selectedId = threadId || null; selection++; readId++; lastReadAt = -Infinity; clearErrors(); closeMenu();
     if (dialog.open && !preserveEditor) closeEditor();
     if (preserveEditor) editorThreadId = selectedId;
     render();

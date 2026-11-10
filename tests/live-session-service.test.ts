@@ -169,3 +169,50 @@ describe("read-only token usage restoration", () => {
     } finally { rmSync(directory, { recursive: true, force: true }); }
   });
 });
+
+test("unchanged revisions omit large snapshots and track updates within existing items", () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-live-revision-"));
+  const path = join(directory, "rollout.jsonl"), store = new LiveSessionStore();
+  try {
+    writeFileSync(path, line("event_msg", { type: "task_started", turn_id: "versioned" })
+      + line("response_item", { type: "custom_tool_call", id: "tool", call_id: "call", input: 'await tools.exec_command({cmd:"run"})' })
+      + line("response_item", { type: "custom_tool_call_output", call_id: "call", output: "Script running with cell ID 1\nOutput:\n" + "output\n".repeat(500000) }));
+    const first = store.read(path);
+    expect(typeof first.revision).toBe("string");
+    expect(JSON.stringify(first).length).toBeGreaterThan(3_000_000);
+    const unchanged = store.read(path, { sinceRevision: first.revision });
+    expect(unchanged).toMatchObject({ unchanged: true, active: true, revision: first.revision });
+    expect(unchanged).not.toHaveProperty("turn");
+    expect(JSON.stringify(unchanged).length).toBeLessThan(300);
+    appendFileSync(path, line("response_item", { type: "custom_tool_call_output", call_id: "call", output: 'Script completed\nOutput:\n{"exit_code":0,"output":"finished"}' }));
+    const changed = store.read(path, { sinceRevision: first.revision });
+    expect(changed.revision).not.toBe(first.revision);
+    expect(changed.turn.items).toHaveLength(1);
+    expect(changed.turn.items[0].aggregatedOutput).toBe("finished");
+    changed.turn.items[0].aggregatedOutput = "do not mutate the cache";
+    expect(store.read(path).turn.items[0].aggregatedOutput).toBe("finished");
+    appendFileSync(path, line("event_msg", { type: "task_complete", turn_id: "versioned" }));
+    const completed = store.read(path, { sinceRevision: changed.revision });
+    expect(completed).toMatchObject({ active: false, turn: null });
+    expect(store.read(path, { sinceRevision: completed.revision }).unchanged).toBe(true);
+    store.clear();
+    expect(store.read(path, { sinceRevision: completed.revision }).revision).not.toBe(completed.revision);
+    expect(new LiveSessionStore().read(path).revision).not.toBe(store.read(path).revision);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("releases least recently read rollout caches without returning false unchanged results", () => {
+  const directory = mkdtempSync(join(tmpdir(), "codex-live-cache-")), store = new LiveSessionStore();
+  try {
+    const paths = Array.from({ length: 17 }, (_, i) => join(directory, `${i}.jsonl`));
+    for (const path of paths) writeFileSync(path, line("event_msg", { type: "task_started", turn_id: path }));
+    const oldest = store.read(paths[0]), recent = store.read(paths[1]);
+    for (const path of paths.slice(2, 16)) store.read(path);
+    expect(store.read(paths[0], { sinceRevision: oldest.revision }).unchanged).toBe(true);
+    store.read(paths[16]);
+    expect(store.read(paths[0], { sinceRevision: oldest.revision }).unchanged).toBe(true);
+    const reloaded = store.read(paths[1], { sinceRevision: recent.revision });
+    expect(reloaded.revision).not.toBe(recent.revision);
+    expect(reloaded.turn.id).toBe(paths[1]);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});

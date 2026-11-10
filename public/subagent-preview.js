@@ -2,6 +2,7 @@ import { agentMessageText, renderAssistantMarkdown, renderItemImages } from './r
 import { renderUserAttachments, userMessageContent } from './user-attachments.js';
 import { summarizeActivity, unifiedDiffFromFileChanges } from './codex-surfaces.js';
 import { settleActivityItem } from './turn-status.js';
+import { isBridgeConnectionError } from './bridge-rpc.js';
 
 const escape = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
 const textParts = parts => (Array.isArray(parts) ? parts : []).map(part => typeof part === 'string' ? part : part?.text || '').filter(Boolean).join('\n');
@@ -26,7 +27,7 @@ export function renderSubagentTurns(turns, { cwd = '', t = text => text } = {}) 
 
 export function createSubagentPreview({ rpc, root, getOwnerId, isVisible, onOpenChat, t, interval = 2400 }) {
   const content = root.querySelector('[data-subagent-content]'), notice = root.querySelector('[data-subagent-notice]'), earlier = root.querySelector('[data-subagent-earlier]');
-  let selected = null, owner = null, generation = 0, timer = null, pending = false, turns = [], cursor = null, markup = '', firstPageLoaded = false;
+  let selected = null, owner = null, generation = 0, timer = null, pending = false, turns = [], cursor = null, markup = '', firstPageLoaded = false, revision = null;
   const current = request => request === generation && owner === getOwnerId() && selected;
   function render() {
     const next = renderSubagentTurns(turns, { cwd: selected?.cwd, t }) || `<p class="side-task-empty">${escape(t('No subagent messages yet.'))}</p>`;
@@ -41,7 +42,7 @@ export function createSubagentPreview({ rpc, root, getOwnerId, isVisible, onOpen
   }
   function suspend() { clearTimeout(timer); timer = null; }
   function close() {
-    suspend(); generation += 1; selected = null; owner = null; pending = false; turns = []; markup = ''; cursor = null; firstPageLoaded = false;
+    suspend(); generation += 1; selected = null; owner = null; pending = false; turns = []; markup = ''; cursor = null; firstPageLoaded = false; revision = null;
     root.hidden = true; root.removeAttribute('aria-busy');
   }
   async function refresh(older = false) {
@@ -51,6 +52,13 @@ export function createSubagentPreview({ rpc, root, getOwnerId, isVisible, onOpen
     const request = generation, id = selected.id;
     pending = true; earlier.disabled = true;
     try {
+      let live = null;
+      if (!older) {
+        try { live = await rpc('host/thread/live', { threadId: id, ...(revision ? { sinceRevision: revision } : {}) }); }
+        catch (error) { if (isBridgeConnectionError(error)) throw error; }
+        if (!current(request)) return;
+        if (revision && live?.unchanged && live.revision === revision) { notice.hidden = true; return; }
+      }
       const threadResult = await rpc('thread/read', { threadId: id, includeTurns: false });
       if (!current(request)) return;
       if (threadResult.thread?.id !== id) throw new Error('Subagent chat not found');
@@ -63,8 +71,6 @@ export function createSubagentPreview({ rpc, root, getOwnerId, isVisible, onOpen
       if (older || !firstPageLoaded) cursor = result.nextCursor || null;
       firstPageLoaded = true;
       if (!older) {
-        const live = await rpc('host/thread/live', { threadId: id }).catch(() => null);
-        if (!current(request)) return;
         if (live?.active && live.turn) {
           const index = turns.findIndex(turn => turn.id === live.turn.id), stored = turns[index];
           const items = [...stored?.items || []];
@@ -77,6 +83,7 @@ export function createSubagentPreview({ rpc, root, getOwnerId, isVisible, onOpen
         }
       }
       notice.hidden = true; render();
+      if (!older) revision = typeof live?.revision === 'string' ? live.revision : null;
     } catch (error) {
       if (current(request)) { notice.hidden = false; notice.querySelector('span').textContent = error?.message || t('Could not load subagent messages'); }
     } finally {

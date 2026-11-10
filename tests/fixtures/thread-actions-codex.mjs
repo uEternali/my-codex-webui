@@ -59,6 +59,9 @@ const finish=(thread,failed=false)=>{
 };
 setInterval(()=>{
  const command=controls();
+ for(const [id,snapshot] of Object.entries(command.turnSnapshots||{})){
+  const thread=threads.get(id);if(thread){thread.turns=snapshot;thread.status={type:snapshot.at(-1)?.status==='inProgress'?'active':'idle'};}
+ }
  for(const thread of threads.values())if(thread.ephemeral)completeSide(thread);
  for(const id of command.resolvedApprovals||[])if(!resolvedApprovals.has(id)){resolvedApprovals.add(id);notify('serverRequest/resolved',{requestId:id})}
  for(const request of command.approvalRequests||[])if(!emittedApprovals.has(request.id)){emittedApprovals.add(request.id);send(request)}
