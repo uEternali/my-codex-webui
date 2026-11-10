@@ -1,6 +1,8 @@
 import { attachmentDirectory, readAttachmentBody } from './attachment-service.js';
 import { readJsonBody } from './http-body.js';
-import { createStaticAssetSender } from './static-assets.js';
+import { acceptsGzip, createStaticAssetSender } from './static-assets.js';
+import { promisify } from 'node:util';
+import { gzip } from 'node:zlib';
 import { AttachmentLifecycle } from './attachment-lifecycle-service.js';
 import { AttachmentUploadStore } from './attachment-upload-service.js';
 import { createReadStream, existsSync, readFileSync } from "node:fs";
@@ -48,6 +50,7 @@ import {
   toPublicAccountIdentity,
 } from "./profile-service.js";
 
+const compressReply = promisify(gzip);
 const host = process.env.HOST || "127.0.0.1";
 const port = Number(process.env.PORT || 8899);
 const accessToken = process.env.CODEX_WEBUI_ACCESS_TOKEN || null;
@@ -631,8 +634,11 @@ const server = createServer(async (req, res) => {
         ? { type: "rpc", id: payload.id, method: payload.method, params: payload.params || {} }
         : { type: payload.error ? "codex/error" : "codex/response", requestId: payload.requestId, result: payload.result, error: payload.error };
       const reply = await dispatchBrowserMessage(message);
-      res.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", "x-content-type-options": "nosniff" });
-      res.end(JSON.stringify(reply));
+      let body = Buffer.from(JSON.stringify(reply));
+      const compressed = body.length >= 1024 && acceptsGzip(req.headers['accept-encoding']);
+      if (compressed) body = await compressReply(body, { level: 3 });
+      res.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", "x-content-type-options": "nosniff", "content-length": body.length, vary: 'Accept-Encoding', ...(compressed ? { 'content-encoding': 'gzip' } : {}) });
+      res.end(body);
     } catch (error) {
       res.writeHead(400, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", "x-content-type-options": "nosniff" });
       res.end(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }));

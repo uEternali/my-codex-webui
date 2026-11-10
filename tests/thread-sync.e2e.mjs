@@ -48,10 +48,17 @@ try {
       const original = window.setTimeout;
       window.setTimeout = (callback, delay, ...args) => original(callback, window.__shortRpcDeadline && delay === 45000 ? 500 : delay, ...args);
     });
-    const page = await context.newPage(), responses = [], requests = new Map(); let drop = false, dropped = 0;
+    const page = await context.newPage(), responses = [], requests = new Map(); let drop = false, dropped = 0, timedOut = 0;
     const threadId = `sync-${transport}-0`, turnId = `sync-${transport}`;
     const observe = (raw, method) => { if (method !== 'host/thread/live') return; const message = JSON.parse(raw); if (message.result) responses.push({ ...message.result, bytes: Buffer.byteLength(raw) }); };
     page.on('pageerror', error => errors.push(error.message));
+    page.on('requestfailed', request => { if (request.url().endsWith('/api/rpc') && request.postDataJSON()?.method === 'host/thread/live') timedOut++; });
+    await page.route('**/api/rpc', async route => {
+      if (drop && route.request().postDataJSON()?.method === 'host/thread/live') {
+        drop = false; dropped++; await Bun.sleep(1000);
+      }
+      await route.continue().catch(() => {});
+    });
     page.on('response', async response => {
       if (!response.url().endsWith('/api/rpc')) return;
       try { const request = response.request().postDataJSON(); observe(await response.text(), request.method); } catch {}
@@ -63,7 +70,6 @@ try {
       upstream.onMessage(raw => {
         const response = JSON.parse(raw), request = requests.get(response.id);
         observe(raw, request?.method);
-        if (drop && request?.method === 'host/thread/live') { drop = false; dropped++; return; }
         socket.send(raw);
       });
     });
@@ -96,14 +102,16 @@ try {
     await waitFor(() => responses.length > before);
     assert(!responses[before].unchanged, 'Reopening a thread forces a full synchronization');
     if (transport === 'ws') {
-      phase = 'WebSocket: response loss and SSE recovery';
+      phase = 'HTTP history timeout with WebSocket events retained';
       await page.locator('#prompt').fill('Draft survives a lost response');
+      const beforeTimeout = responses.length;
       await page.evaluate(() => { window.__shortRpcDeadline = true; }); drop = true;
-      await page.waitForFunction(() => globalThis.__codexWebuiDebug.state.transport === 'sse' && globalThis.__codexWebuiDebug.state.connected);
-      assert(dropped === 1, 'Drop exactly one response while keeping the socket open');
+      await waitFor(() => timedOut === 1 && responses.length > beforeTimeout);
+      assert(dropped === 1, 'Delay exactly one history response until its request deadline');
+      assert(await page.evaluate(() => globalThis.__codexWebuiDebug.state.transport === 'ws' && globalThis.__codexWebuiDebug.state.connected), 'A slow history request keeps the real-time socket connected');
       assert(await page.locator('#prompt').inputValue() === 'Draft survives a lost response', 'Timeout recovery preserves unsent input');
     }
-    results.push({ transport, firstBytes: first.bytes, unchangedBytes: small[0].bytes, idleHistoryReads: 1, appendUpdates: true, reconnect: transport === 'ws' });
+    results.push({ transport, firstBytes: first.bytes, unchangedBytes: small[0].bytes, idleHistoryReads: 1, appendUpdates: true, readTimeoutRecovery: transport === 'ws' });
     await context.close();
   }
   assert(!calls().some(call => ['turn/start', 'turn/interrupt', 'thread/resume', 'thread/delete'].includes(call.method)), 'All diagnostics remain read-only, including response-loss recovery');

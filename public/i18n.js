@@ -82,6 +82,8 @@ Object.assign(ZH_CN, {
   "Connecting to Codex": "正在连接 Codex",
   "Connecting to Codex…": "正在连接 Codex…",
   "Unable to load Codex": "无法加载 Codex",
+  "Still connecting to Codex": "仍在连接 Codex",
+  "The connection is slow. Loading will continue; you can wait or retry.": "网络较慢，仍在继续加载。你可以等待或重试。",
   "Connecting is taking longer than expected.": "连接耗时较长，请重试。",
   "Codex connected": "Codex 已连接",
   "Settings": "设置",

@@ -3,7 +3,7 @@ import { renderUserAttachments, userMessageContent } from './user-attachments.js
 import { DEFAULT_TURN_PAGE_SIZE, applyComposerSuggestion, createLatestRequestGate, createTurnWindow, filterAppModels, getComposerAutocomplete, resolveComposerPlaceholder, selectModelState } from './ui-core.js';
 import { HISTORY_ITEM_PAGE_SIZE, historyItemWindow } from './history-window.js';
 import { createThreadTurnReader } from './thread-sync.js';
-import { postBridgeJson, waitForRpcResponse } from './bridge-rpc.js';
+import { bridgeUsesHttp, postBridgeJson, waitForRpcResponse } from './bridge-rpc.js';
 import { fetchJson } from './fetch-json.js';
 import { agentMessageText, renderAssistantMarkdown, renderItemImages } from './rendering.js';
 import { codexIcon, hydrateCodexIcons } from './codex-icons.js';
@@ -131,7 +131,7 @@ function connect(){
 }
 function rpc(method,params={}){
   const id=state.rpcId++;
-  if(state.transport==='sse')return postBridge('/api/rpc',{id,method,params}).then(message=>{if(message.type!=='rpc/result')throw createBridgeError(message.error||'Codex bridge request failed',message.code);return message.result});
+  if(state.transport==='sse'||(bridgeUsesHttp(method)&&state.ws?.readyState===WebSocket.OPEN))return postBridge('/api/rpc',{id,method,params}).then(message=>{if(message.type!=='rpc/result')throw createBridgeError(message.error||'Codex bridge request failed',message.code);return message.result});
   if(state.ws?.readyState===WebSocket.OPEN){const ws=state.ws;return waitForRpcResponse(state.pending,id,()=>{try{ws.send(JSON.stringify({type:'rpc',id,method,params}))}catch{fallbackToSse(ws);throw transportSwitchError()}},{method,onTimeout:()=>fallbackToSse(ws)})}
   return Promise.reject(transportSwitchError());
 }

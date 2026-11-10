@@ -1,5 +1,10 @@
 import { expect, test } from 'bun:test';
-import { bridgeRequestTimeout, postBridgeJson, waitForRpcResponse } from '../public/bridge-rpc.js';
+import { bridgeRequestTimeout, bridgeUsesHttp, postBridgeJson, waitForRpcResponse } from '../public/bridge-rpc.js';
+
+test('bulk history uses compressed HTTP while interactive commands stay on WebSocket', () => {
+  for (const method of ['host/thread/live', 'thread/read', 'thread/turns/list', 'thread/resume', 'thread/fork']) expect(bridgeUsesHttp(method)).toBe(true);
+  for (const method of ['turn/start', 'turn/steer', 'turn/interrupt', 'thread/goal/get']) expect(bridgeUsesHttp(method)).toBe(false);
+});
 
 function clock() {
   const tasks = new Set<() => void>();

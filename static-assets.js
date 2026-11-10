@@ -4,7 +4,7 @@ import { promisify } from 'node:util';
 import { gzip } from 'node:zlib';
 
 const compress = promisify(gzip);
-const acceptsGzip = header => String(header || '').split(',').some(part => {
+export const acceptsGzip = header => String(header || '').split(',').some(part => {
   const [name, ...parameters] = part.trim().toLowerCase().split(';');
   return name === 'gzip' && !parameters.some(parameter => /^\s*q\s*=\s*0(?:\.0*)?\s*$/.test(parameter));
 });

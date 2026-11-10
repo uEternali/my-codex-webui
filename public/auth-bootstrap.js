@@ -13,12 +13,18 @@ const startup={
   begin(){
     if(!app.hasAttribute('data-loading'))return;
     clearTimeout(startupTimer);screen.hidden=false;screen.setAttribute('aria-busy','true');$('#startupError').hidden=true;
-    startupTimer=setTimeout(()=>startup.fail(new Error(t('Connecting is taking longer than expected.'))),20_000);
+    startupTimer=setTimeout(()=>startup.wait(),20_000);
   },
   pause(){clearTimeout(startupTimer);screen.hidden=true},
+  wait(){
+    if(!app.hasAttribute('data-loading'))return;
+    screen.hidden=false;screen.setAttribute('aria-busy','true');$('#startupError').setAttribute('role','status');
+    $('#startupError p').textContent=t('Still connecting to Codex');$('#startupErrorDetail').textContent=t('The connection is slow. Loading will continue; you can wait or retry.');$('#startupError').hidden=false;
+    $('#startupRetry').onclick=()=>location.reload();
+  },
   fail(reason,retry=()=>location.reload()){
     if(!app.hasAttribute('data-loading'))return;
-    clearTimeout(startupTimer);screen.hidden=false;screen.setAttribute('aria-busy','false');$('#startupErrorDetail').textContent=reason?.message||String(reason);$('#startupError').hidden=false;
+    clearTimeout(startupTimer);screen.hidden=false;screen.setAttribute('aria-busy','false');$('#startupError').setAttribute('role','alert');$('#startupError p').textContent=t('Unable to load Codex');$('#startupErrorDetail').textContent=reason?.message||String(reason);$('#startupError').hidden=false;
     $('#startupRetry').onclick=()=>{startup.begin();retry()};
   },
   finish(){

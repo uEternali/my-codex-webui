@@ -1,4 +1,8 @@
 const READ_METHODS = new Set(['host/thread/live', 'thread/read', 'thread/turns/list', 'thread/list', 'thread/goal/get', 'model/list', 'permissionProfile/list']);
+// Bun's ws compatibility layer does not compress frames. Keep bulk history
+// responses on HTTP, where the browser negotiates and decodes gzip automatically.
+const HISTORY_METHODS = new Set(['host/thread/live', 'thread/read', 'thread/turns/list', 'thread/resume', 'thread/fork']);
+export const bridgeUsesHttp = method => HISTORY_METHODS.has(method);
 export const bridgeRequestTimeout = method => READ_METHODS.has(method) ? 45_000 : 120_000;
 export const isBridgeConnectionError = error => error?.silentTransportSwitch || error?.code === 'BRIDGE_REQUEST_TIMEOUT';
 
