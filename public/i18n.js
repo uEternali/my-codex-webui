@@ -571,6 +571,7 @@ const ZH_CN_PATTERNS = [
   [/^(\d+) changed files?$/, match => `${match[1]} 个文件已更改`],
   [/^Review (\d+) changed files?$/, match => `审阅 ${match[1]} 个已更改文件`],
   [/^Load earlier messages \((\d+)\)$/, match => `加载更早的消息（${match[1]}）`],
+  [/^Load earlier activity \((\d+)\)$/, match => `加载更早的记录（${match[1]}）`],
   [/^Worked for (.+)$/, match => `处理耗时 ${match[1]}`],
   [/^Retrying request \((\d+)\)$/, match => `正在重试（第 ${match[1]} 次）`],
   [/^Model: (.+)$/, match => `模型：${match[1]}`],
