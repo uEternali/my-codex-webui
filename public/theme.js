@@ -23,7 +23,7 @@ export function createThemeController({ button, t, onChange }) {
   function apply() {
     current = preference || (system.matches ? 'dark' : 'light');
     document.documentElement.dataset.theme = current;
-    document.querySelector('meta[name="theme-color"]').content = current === 'dark' ? '#242424' : '#ffffff';
+    document.querySelector('meta[name="theme-color"]').content = current === 'dark' ? '#242424' : '#fafafa';
     render();
     onChange();
   }

@@ -41,10 +41,11 @@ try {
   assert(await page.locator('.file-preview-code .hljs-keyword').first().evaluate(node => getComputedStyle(node).color) === 'rgb(155, 42, 124)', 'Light syntax follows the explicit light theme on a dark OS');
   await page.locator('#toggleBottomPanel').click();
   await page.waitForFunction(() => globalThis.__codexTerminal?.term && globalThis.__codexTerminal.state.ws?.readyState === 1);
+  assert(await page.evaluate(() => getComputedStyle(document.body).backgroundColor === 'rgb(250, 250, 250)' && globalThis.__codexTerminal.term.options.theme.background === '#fafafa' && globalThis.__codexTerminal.term.options.minimumContrastRatio === 4.5), 'Light mode uses a soft gray background and makes low-contrast terminal colors legible');
   await page.evaluate(() => { window.__themeTerminal = globalThis.__codexTerminal.term; window.__themeSocket = globalThis.__codexTerminal.state.ws; });
   await page.locator('#toggleTheme').click(); await expectTheme(page, 'dark');
   assert(await page.locator('.file-preview-code .hljs-keyword').first().evaluate(node => getComputedStyle(node).color) === 'rgb(216, 161, 230)', 'Existing syntax highlighting switches with the page');
-  assert(await page.evaluate(() => globalThis.__codexTerminal.term === window.__themeTerminal && globalThis.__codexTerminal.state.ws === window.__themeSocket && globalThis.__codexTerminal.term.options.theme.background === '#242424'), 'Switching updates an existing terminal without restarting it');
+  assert(await page.evaluate(() => globalThis.__codexTerminal.term === window.__themeTerminal && globalThis.__codexTerminal.state.ws === window.__themeSocket && globalThis.__codexTerminal.term.options.theme.background === '#242424' && globalThis.__codexTerminal.term.options.minimumContrastRatio === 1), 'Switching updates an existing terminal without restarting it and retains the original dark palette');
   await page.locator('#closeBottomPanel').click(); await page.locator('#closeSidePanel').click();
   phase = 'dialog and persistence';
   await page.locator('.thread-item[data-id="theme-0"]').hover();

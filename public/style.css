@@ -130,7 +130,7 @@ body.side-panel-open{--changes-w:340px}body.review-split-open.side-panel-open{--
 /* Codex Desktop 26.707 shell tokens and panel layout. */
 :root{
   color-scheme:light;
-  --app-main:#fff;
+  --app-main:#fafafa;
   --app-sidebar:#f7f7f7;
   --app-panel:var(--app-main);
   --app-text:#0d0d0d;
